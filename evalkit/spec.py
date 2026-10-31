@@ -7,11 +7,11 @@ leaves the repository raises :class:`SpecError` with the file and the reason.
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from evalkit import frontmatter
+from evalkit import checks, frontmatter
 
 SCHEMA = 1
 EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
@@ -77,9 +77,16 @@ class SkillSpec:
     targets: frozenset[str]
     document: frontmatter.Document
     resources: tuple[Resource, ...]
+    model: str | None = None  # run-only [override] from a *.skill.toml
+    effort: str | None = None
 
     @property
     def dir_name(self) -> str:
+        return self.root.name
+
+    @property
+    def name(self) -> str:
+        """The name Claude Code loads the skill under: its directory name."""
         return self.root.name
 
 
@@ -88,10 +95,48 @@ class Case:
     id: str
     input: str
     files: tuple[tuple[str, str], ...]
-    checks: tuple[dict[str, object], ...]  # typed in phase 2, when checks run
+    checks: tuple[checks.Check, ...]
 
 
 Subject = PromptSpec | SkillSpec
+
+
+@dataclass(frozen=True)
+class Variant:
+    """A subject plus run settings; no subject is the control.
+
+    Model and effort resolve as variant, then subject, then the CLI default (None).
+    """
+
+    id: str
+    subject: Subject | None
+    model: str | None
+    effort: str | None
+
+    @property
+    def skill(self) -> SkillSpec | None:
+        return self.subject if isinstance(self.subject, SkillSpec) else None
+
+
+@dataclass(frozen=True)
+class Suite:
+    path: Path
+    samples: int
+    allowed_tools: tuple[str, ...]  # pre-approved for every variant, so pairs stay fair
+    timeout_s: int
+    variants: tuple[Variant, ...]
+    cases: tuple[Case, ...]
+
+    def variant(self, variant_id: str) -> Variant:
+        for variant in self.variants:
+            if variant.id == variant_id:
+                return variant
+        known = ", ".join(v.id for v in self.variants)
+        raise SpecError(self.path, f"no variant {variant_id!r}; variants: {known}")
+
+
+MAX_SAMPLES = 20
+DEFAULT_TIMEOUT_S = 600
 
 
 def load_subject(path: Path) -> Subject:
@@ -118,13 +163,52 @@ def load_skill_dir(root: Path, targets: frozenset[str]) -> SkillSpec:
     return SkillSpec(root.resolve(), targets, document, _resources(root))
 
 
-def load_cases(path: Path) -> tuple[Case, ...]:
-    """Read the ``[[case]]`` tables of a suite file."""
+def load_suite(path: Path) -> Suite:
+    """Read a whole suite: settings, variants and cases."""
     data = _read_toml(path)
+    _check_keys(path, data, {"samples", "allowed_tools", "timeout", "variant", "case"})
+    samples = data.get("samples", 1)
+    if not isinstance(samples, int) or not 1 <= samples <= MAX_SAMPLES:
+        raise SpecError(path, f"samples must be an integer from 1 to {MAX_SAMPLES}")
+    timeout = data.get("timeout", DEFAULT_TIMEOUT_S)
+    if not isinstance(timeout, int) or timeout <= 0:
+        raise SpecError(path, "timeout must be a positive number of seconds")
+    raw_variants = data.get("variant", {})
+    if not isinstance(raw_variants, dict) or not raw_variants:
+        raise SpecError(path, "define at least one [variant.<id>] table")
+    variants = tuple(_variant(path, vid, raw) for vid, raw in raw_variants.items())
+    return Suite(path, samples, tuple(_str_list(path, data, "allowed_tools", default=[])),
+                 timeout, variants, _cases(path, data))
+
+
+def load_cases(path: Path) -> tuple[Case, ...]:
+    """Read only the ``[[case]]`` tables of a suite file."""
+    return _cases(path, _read_toml(path))
+
+
+def _variant(path: Path, variant_id: str, raw: object) -> Variant:
+    if not isinstance(raw, dict):
+        raise SpecError(path, f"[variant.{variant_id}] must be a table")
+    _check_keys(path, raw, {"subject", "model", "effort"}, where=f"[variant.{variant_id}]")
+    _check_effort(path, raw.get("effort"))
+    source = _optional_str(path, raw, "subject")
+    # A subject usually lives in another repository, so it is not confined.
+    subject = None if source is None else load_subject((path.parent / source).resolve())
+    return Variant(
+        id=variant_id,
+        subject=subject,
+        model=_optional_str(path, raw, "model") or (subject.model if subject else None),
+        effort=_optional_str(path, raw, "effort") or (subject.effort if subject else None),
+    )
+
+
+def _cases(path: Path, data: dict[str, object]) -> tuple[Case, ...]:
     raw_cases = data.get("case", [])
     if not isinstance(raw_cases, list):
         raise SpecError(path, "'case' must be an array of tables ([[case]])")
     cases = tuple(_case(path, raw) for raw in raw_cases)
+    if not cases:
+        raise SpecError(path, "define at least one [[case]]")
     ids = [case.id for case in cases]
     duplicates = sorted({i for i in ids if ids.count(i) > 1})
     if duplicates:
@@ -146,7 +230,9 @@ def _skill_from_toml(path: Path, data: dict[str, object]) -> SkillSpec:
     _check_effort(path, override.get("effort"))
     source = _required_str(path, data, "from")
     # A skill usually lives in another repository, so `from` is not confined.
-    return load_skill_dir((path.parent / source).resolve(), targets)
+    skill = load_skill_dir((path.parent / source).resolve(), targets)
+    return replace(skill, model=_optional_str(path, override, "model"),
+                   effort=_optional_str(path, override, "effort"))
 
 
 def _prompt_from_toml(path: Path, data: dict[str, object]) -> PromptSpec:
@@ -196,11 +282,16 @@ def _case(path: Path, raw: object) -> Case:
     files = raw.get("files", {})
     if not isinstance(files, dict) or not all(isinstance(v, str) for v in files.values()):
         raise SpecError(path, "[[case]] files must map paths to strings")
-    checks = raw.get("checks", [])
-    if not isinstance(checks, list) or not all(isinstance(c, dict) for c in checks):
+    raw_checks = raw.get("checks", [])
+    if not isinstance(raw_checks, list) or not all(isinstance(c, dict) for c in raw_checks):
         raise SpecError(path, "[[case]] checks must be an array of inline tables")
-    return Case(_required_str(path, raw, "id"), _required_str(path, raw, "input"),
-                tuple(sorted(files.items())), tuple(checks))
+    case_id = _required_str(path, raw, "id")
+    try:
+        parsed = tuple(checks.parse(c) for c in raw_checks)
+    except ValueError as exc:
+        raise SpecError(path, f"case {case_id!r}: {exc}") from None
+    files = {name: _text(path, text) for name, text in files.items()}
+    return Case(case_id, _required_str(path, raw, "input"), tuple(sorted(files.items())), parsed)
 
 
 def _resources(root: Path) -> tuple[Resource, ...]:

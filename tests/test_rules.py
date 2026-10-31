@@ -2,7 +2,7 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 
-from evalkit import rules
+from evalkit import checks, rules
 from evalkit.lint import Finding, LintContext, Severity, run
 from evalkit.spec import Case, load_subject
 from tests.helpers import TempDirTest
@@ -14,7 +14,8 @@ class SkillRulesTest(TempDirTest):
         return list(rule(LintContext(load_subject(skill), cases)))
 
     def test_clean_skill_has_no_findings(self) -> None:
-        cases = tuple(Case(str(i), "x", (), ()) for i in range(3))
+        check = (checks.Contains("x", None),)
+        cases = tuple(Case(str(i), "x", (), check) for i in range(3))
         findings = run(LintContext(load_subject(self.make_skill()), cases), rules.RULES)
         self.assertEqual(findings, [])
 
@@ -88,8 +89,9 @@ class SkillRulesTest(TempDirTest):
         skill = self.make_skill()
         (none,) = self.lint(skill, rules.skill_cases, cases=None)
         self.assertEqual(none.severity, Severity.INFO)
-        (few,) = self.lint(skill, rules.skill_cases, cases=(Case("a", "x", (), ()),))
-        self.assertEqual(few.severity, Severity.WARN)
+        few = self.lint(skill, rules.skill_cases, cases=(Case("a", "x", (), ()),))
+        self.assertEqual([f.severity for f in few], [Severity.WARN, Severity.WARN])
+        self.assertIn("pass vacuously: a", few[1].message)
 
 
 class PromptRulesTest(TempDirTest):

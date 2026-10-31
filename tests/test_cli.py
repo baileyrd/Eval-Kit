@@ -57,7 +57,7 @@ class InitCommandTest(TempDirTest):
         self.assertEqual(len(cases), 3)
         self.assertIn("Use when the user mentions widgets", cases[0].input)
         code, out, _ = run_cli("lint", str(skill))
-        self.assertNotIn("skill.cases", out)
+        self.assertIn("pass vacuously", out)  # the TODO cases have no checks yet
 
     def test_refuses_to_overwrite_without_force(self) -> None:
         skill = self.make_skill()

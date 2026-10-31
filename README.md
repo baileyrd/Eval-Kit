@@ -8,8 +8,8 @@ Standard library only, Python 3.11+. See [docs/design.md](docs/design.md).
 
 ## Status
 
-Phase 1 of 4: `lint` and `init`. Neither makes a model call. Running suites
-(`run`, `score`, `compare`, `gate`) arrives in later phases; see the design.
+Phases 1 and 2 of 4: `lint`, `init`, `run`, `score` and `compare`. The model
+judge (phase 3) and ablation and `gate` (phase 4) come later; see the design.
 
 ## Use
 
@@ -18,9 +18,64 @@ python3 -m evalkit lint path/to/skill_pack            # every SKILL.md below it
 python3 -m evalkit lint my.prompt.toml my.skill.toml  # subject files
 python3 -m evalkit lint skills/ --min-severity warn --format json
 python3 -m evalkit init path/to/skill                 # writes evals/suite.toml
+
+python3 -m evalkit run     suite.toml [--jobs 4]      # runs only what isn't stored yet
+python3 -m evalkit score   suite.toml [--verbose]     # pass and trigger rates; no model calls
+python3 -m evalkit compare suite.toml control skill   # paired lift with a 95% interval
 ```
 
-`lint` exits 1 when any finding is an error. Each finding names the rule, the
+`lint` exits 1 when any finding is an error.
+
+## Suites
+
+```toml
+samples       = 3             # runs per variant per case
+allowed_tools = ["Bash"]      # pre-approved for every variant; edits are always allowed
+timeout       = 600           # seconds per run
+
+[variant.control]             # no subject: the same run without the skill
+[variant.skill]
+subject = ".."                # a skill directory, *.skill.toml or *.prompt.toml
+model   = "claude-sonnet-5-5" # optional; overrides the subject's own
+
+[[case]]
+id     = "char-counter"
+input  = "Build a live character counter in Datastar Pro..."
+files  = { "index.html" = "file:fixtures/empty.html" }   # copied in before the run
+checks = [{ regex = "data-bind" }, { contains = "280", in = "index.html" }]
+```
+
+Checks: `contains`, `regex` (both on the final text, or a file with `in`),
+`file_exists`, `tool_called`, and `all` / `any` over a list of checks. A run
+passes when all of its case's checks pass.
+
+For skill variants `score` also reports the **trigger rate**, the share of runs
+where Claude actually loaded the skill, and `compare` reports lift on those runs
+alone. A skill that never triggers and one that triggers but doesn't help need
+different fixes.
+
+## How runs work
+
+Each run is `claude -p` in a fresh temporary project with its own
+`CLAUDE_CONFIG_DIR`, so none of your installed skills, CLAUDE.md, plugins,
+settings or MCP servers leak in. A skill under test is copied into the project's
+`.claude/skills/`; a prompt replaces Claude Code's system prompt. Every run
+checks the loaded-skills list and fails if the control saw the skill under test,
+or the skill variant didn't load it.
+
+Runs use your Claude subscription login, never the API: `ANTHROPIC_API_KEY` is
+removed from each run's environment. The login comes from
+`CLAUDE_CODE_OAUTH_TOKEN` if set (create one with `claude setup-token`; needed
+on macOS, where the login lives in the keychain), otherwise from a copy of
+`~/.claude/.credentials.json`.
+
+Traces go to `.evalkit/<suite>.jsonl` beside the suite (add `.evalkit/` to
+`.gitignore`). Each is keyed by a hash of everything that can change the result:
+the skill's files or the rendered prompt, model, effort, allowed tools, the
+case's input and fixtures, and the sample number. Change a skill and only its
+runs repeat; change a check and `score` re-judges without calling the model. A
+new Claude CLI version re-runs everything. Failed runs aren't stored, so the
+next `run` retries them. Each finding names the rule, the
 file, and the Anthropic page the rule comes from.
 
 ## Subjects

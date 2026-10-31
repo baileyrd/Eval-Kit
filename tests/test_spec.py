@@ -1,5 +1,6 @@
 import unittest
 
+from evalkit.checks import Regex
 from evalkit.spec import PromptSpec, SkillSpec, SpecError, load_cases, load_subject
 from tests.helpers import TempDirTest
 
@@ -111,7 +112,7 @@ class CasesTest(TempDirTest):
                                         'files = { "x.txt" = "y" }\nchecks = [{ regex = "h" }]\n')
         (case,) = load_cases(path)
         self.assertEqual((case.id, case.input, case.files), ("a", "hi", (("x.txt", "y"),)))
-        self.assertEqual(case.checks, ({"regex": "h"},))
+        self.assertEqual(case.checks, (Regex("h", None),))
 
     def test_rejects_duplicate_ids_and_missing_input(self) -> None:
         dup = self.write("d.toml", '[[case]]\nid = "a"\ninput = "x"\n[[case]]\nid = "a"\ninput = "y"\n')

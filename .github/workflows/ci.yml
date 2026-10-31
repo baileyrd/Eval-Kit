@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 3.11 is the floor (tomllib); 3.13 is current.
+        python-version: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Unit tests
+        run: python -m unittest discover -s tests -t . -v
+      # mypy is a CI-only check, not a runtime dependency. Pinned so a release
+      # can't change the verdict under an unrelated PR.
+      - name: Type check
+        run: python -m pip install mypy==2.4.1 && python -m mypy

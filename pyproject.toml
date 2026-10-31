@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evalkit"
+version = "0.1.0"
+description = "Evaluate prompts and Agent Skills against Anthropic's guidance and by running them."
+readme = "README.md"
+requires-python = ">=3.11"  # tomllib
+dependencies = []
+
+[project.scripts]
+evalkit = "evalkit.cli:main"
+
+[tool.setuptools]
+packages = ["evalkit"]
+
+[tool.mypy]
+strict = true
+files = ["evalkit"]

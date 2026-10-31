@@ -1,4 +1,4 @@
-"""Command line: lint, init, run, score, compare, calibrate."""
+"""Command line: lint, init, run, score, compare, calibrate, ablate, gate."""
 
 from __future__ import annotations
 
@@ -6,17 +6,18 @@ import argparse
 import json
 import sys
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import asdict
+from contextlib import ExitStack
+from dataclasses import asdict, replace
 from pathlib import Path
 
-from evalkit import engine, judge, lint, plan, render, rules, scaffold, stats
+from evalkit import ablate, engine, gitrev, judge, lint, plan, render, rules, scaffold, stats
 from evalkit.runner import CliRunner, RunError, cli_version
 from evalkit.spec import (SKILL_FILE, SUITE_FILE, Case, SkillSpec, SpecError, Suite, Variant,
                           load_cases,
                           load_skill_dir, load_subject, load_suite)
 from evalkit.store import JsonlStore
 
-SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv"})
+SKIP_DIRS = frozenset({".git", ".evalkit", "node_modules", "__pycache__", ".venv"})
 CONFIRM_ABOVE = 50  # jobs; more than this needs --yes
 
 
@@ -47,9 +48,7 @@ def _parser() -> argparse.ArgumentParser:
     run_cmd = commands.add_parser("run", help="run what has no stored trace, then judge "
                                              "what has no cached verdict")
     _suite_args(run_cmd)
-    run_cmd.add_argument("--jobs", type=int, default=1, help="runs in parallel (default 1)")
-    run_cmd.add_argument("--yes", action="store_true",
-                         help=f"don't stop when more than {CONFIRM_ABOVE} runs are needed")
+    _run_args(run_cmd)
     run_cmd.set_defaults(handler=_run)
 
     score_cmd = commands.add_parser("score", help="judge stored traces; no model calls")
@@ -68,6 +67,23 @@ def _parser() -> argparse.ArgumentParser:
     _suite_args(calibrate_cmd)
     calibrate_cmd.add_argument("labels", type=Path, help="labels JSONL file")
     calibrate_cmd.set_defaults(handler=_calibrate)
+
+    ablate_cmd = commands.add_parser(
+        "ablate", help="run a variant with each section or resource left out in turn")
+    _suite_args(ablate_cmd)
+    ablate_cmd.add_argument("variant")
+    _run_args(ablate_cmd)
+    ablate_cmd.set_defaults(handler=_ablate)
+
+    gate_cmd = commands.add_parser(
+        "gate", help="fail when HEAD is likely worse than BASE by more than --max-drop")
+    _suite_args(gate_cmd)
+    gate_cmd.add_argument("base", help="variant id, or id@<git rev> for the variant as it was")
+    gate_cmd.add_argument("head", help="variant id, or id@<git rev>")
+    gate_cmd.add_argument("--max-drop", type=float, required=True,
+                          help="largest tolerated drop in pass rate, e.g. 0.1")
+    _run_args(gate_cmd)
+    gate_cmd.set_defaults(handler=_gate)
     return parser
 
 
@@ -75,6 +91,12 @@ def _suite_args(command: argparse.ArgumentParser) -> None:
     command.add_argument("suite", type=Path, help="suite TOML file")
     command.add_argument("--store", type=Path,
                          help="trace file (default: .evalkit/<suite>.jsonl beside the suite)")
+
+
+def _run_args(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--jobs", type=int, default=1, help="runs in parallel (default 1)")
+    command.add_argument("--yes", action="store_true",
+                         help=f"don't stop when more than {CONFIRM_ABOVE} runs are needed")
 
 
 def _lint(args: argparse.Namespace) -> int:
@@ -148,13 +170,20 @@ def _load(args: argparse.Namespace) -> tuple[Suite, JsonlStore, list[plan.Job]]:
 def _run(args: argparse.Namespace) -> int:
     try:
         suite, store, jobs = _load(args)
-        version = cli_version()
+        failures = _execute(suite, store, jobs, args)
     except (SpecError, RunError, ValueError) as exc:
         return _fail(exc)
+    return 1 if failures else 0
+
+
+def _execute(suite: Suite, store: JsonlStore, jobs: Sequence[plan.Job],
+             args: argparse.Namespace) -> int:
+    """Run the jobs with no current trace, then judge what has no verdict. Returns failures."""
+    version = cli_version()
     todo = engine.pending(jobs, store, version)
-    print(f"{len(jobs)} runs in the suite, {len(todo)} to do ({version})")
+    print(f"{len(jobs)} runs, {len(todo)} to do ({version})")
     if len(todo) > CONFIRM_ABOVE and not args.yes:
-        return _fail(f"{len(todo)} runs is more than {CONFIRM_ABOVE}; pass --yes to go ahead")
+        raise ValueError(f"{len(todo)} runs is more than {CONFIRM_ABOVE}; pass --yes to go ahead")
     runner = CliRunner(suite)
     failures = engine.execute(todo, runner, store, version, args.jobs, _progress(len(todo)))
     to_judge = judge.pending(jobs, store, suite.judge)
@@ -163,7 +192,7 @@ def _run(args: argparse.Namespace) -> int:
         failures += engine.execute_judging(to_judge, runner, suite.judge, store, args.jobs,
                                            _progress(len(to_judge)))
     print(f"stored in {store.path}; {failures} failed (re-run to retry them)")
-    return 1 if failures else 0
+    return failures
 
 
 def _progress(total: int) -> Callable[[str, Exception | None], None]:
@@ -206,14 +235,18 @@ def _compare(args: argparse.Namespace) -> int:
         result = stats.compare(engine.score(jobs, store, suite.judge).outcomes, base.id, head.id)
     except (SpecError, ValueError) as exc:
         return _fail(exc)
-    print(f"{head.id} vs {base.id} over {result.cases} case(s)")
+    _print_comparison(result, head)
+    return 0
+
+
+def _print_comparison(result: stats.Comparison, head: Variant) -> None:
+    print(f"{head.id} vs {result.base} over {result.cases} case(s)")
     print(f"lift {result.lift:+.0%}  (95% interval {result.low:+.0%} to {result.high:+.0%})")
     if result.lift_when_triggered is not None:
         skill = head.skill.name if head.skill else head.id
         print(f"lift on runs where {skill} loaded {result.lift_when_triggered:+.0%}")
     print(f"improved: {', '.join(result.improved) or 'none'}")
     print(f"regressed: {', '.join(result.regressed) or 'none'}")
-    return 0
 
 
 def _require_same_inputs(suite: Suite, base: Variant, head: Variant) -> None:
@@ -299,6 +332,71 @@ def _labelled_pairs(path: Path, jobs: Sequence[plan.Job], store: JsonlStore,
 
 def _row_id(row: dict[str, object]) -> tuple[str, str, str, str]:
     return (str(row["variant"]), str(row["case"]), str(row["sample"]), str(row["rubric"]))
+
+
+def _ablate(args: argparse.Namespace) -> int:
+    try:
+        suite, store, _ = _load(args)
+        full = suite.variant(args.variant)
+        ablated = ablate.variants(full, store.path.parent / "ablate" / full.id)
+        if not ablated:
+            raise ValueError(f"variant {full.id!r} has no sections or resources to leave out")
+        trial = replace(suite, variants=(full, *(v for _, v in ablated)))
+        jobs = plan.jobs(trial)
+        failures = _execute(trial, store, jobs, args)
+        outcomes = engine.score(jobs, store, suite.judge).outcomes
+    except (SpecError, RunError, ValueError, OSError) as exc:
+        return _fail(exc)
+    print(f"\n{full.id} with one piece left out; lift is the change in pass rate without it")
+    rows = []
+    for piece, variant in ablated:
+        try:
+            rows.append((piece, stats.compare(outcomes, full.id, variant.id)))
+        except ValueError:
+            print(f"  {'?':>5}  no results  {piece.label}")
+    for piece, result in sorted(rows, key=lambda row: row[1].lift):
+        regressed = f"  regressed: {', '.join(result.regressed)}" if result.regressed else ""
+        print(f"  {result.lift:>+5.0%}  ({result.low:+.0%} to {result.high:+.0%})  "
+              f"{piece.label}{regressed}")
+    return 1 if failures else 0
+
+
+def _gate(args: argparse.Namespace) -> int:
+    if not 0 <= args.max_drop < 1:
+        return _fail("--max-drop is a share of cases between 0 and 1, e.g. 0.1")
+    with ExitStack() as stack:
+        try:
+            suite, store, _ = _load(args)
+            base = _variant_at(suite, args.base, stack)
+            head = _variant_at(suite, args.head, stack)
+            _require_same_inputs(suite, base, head)
+            trial = replace(suite, variants=(base, head))
+            jobs = plan.jobs(trial)
+            failures = _execute(trial, store, jobs, args)
+            result = stats.compare(engine.score(jobs, store, suite.judge).outcomes,
+                                   base.id, head.id)
+        except (SpecError, RunError, ValueError, gitrev.GitError) as exc:
+            return _fail(exc)
+    _print_comparison(result, head)
+    if stats.too_few_cases(result, args.max_drop):
+        print(f"warning: the interval is wider than {2 * args.max_drop:.0%}, so a drop of "
+              f"{args.max_drop:.0%} may go unseen; add cases or samples")
+    if failures:
+        return _fail(f"gate not decided: {failures} run(s) failed")
+    if not stats.gate_passes(result, args.max_drop):
+        return _fail(f"gate failed: {head.id} is likely worse than {base.id} by more than "
+                     f"{args.max_drop:.0%}")
+    print(f"gate passed (max drop {args.max_drop:.0%})")
+    return 0
+
+
+def _variant_at(suite: Suite, spec: str, stack: ExitStack) -> Variant:
+    """The variant named *spec*; ``id@rev`` loads it from the suite as it was at *rev*."""
+    if "@" not in spec:
+        return suite.variant(spec)
+    variant_id, rev = spec.rsplit("@", 1)
+    past = load_suite(stack.enter_context(gitrev.at_revision(suite.path, rev)))
+    return replace(past.variant(variant_id), id=spec)
 
 
 def _fail(error: object) -> int:

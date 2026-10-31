@@ -8,8 +8,8 @@ Standard library only, Python 3.11+. See [docs/design.md](docs/design.md).
 
 ## Status
 
-Phases 1 to 3 of 4: `lint`, `init`, `run`, `score`, `compare`, the model judge
-and `calibrate`. Ablation and `gate` (phase 4) come later; see the design.
+All four phases: `lint`, `init`, `run`, `score`, `compare`, the model judge,
+`calibrate`, `ablate` and `gate`.
 
 ## Use
 
@@ -23,6 +23,8 @@ python3 -m evalkit run     suite.toml [--jobs 4]      # runs only what isn't sto
 python3 -m evalkit score   suite.toml [--verbose]     # pass and trigger rates; no model calls
 python3 -m evalkit compare suite.toml control skill   # paired lift with a 95% interval
 python3 -m evalkit calibrate suite.toml labels.jsonl  # judge vs your labels
+python3 -m evalkit ablate  suite.toml skill           # what each section and file is worth
+python3 -m evalkit gate    suite.toml skill@main skill --max-drop 0.1   # CI regression check
 ```
 
 `lint` exits 1 when any finding is an error.
@@ -78,6 +80,30 @@ For skill variants `score` also reports the **trigger rate**, the share of runs
 where Claude actually loaded the skill, and `compare` reports lift on those runs
 alone. A skill that never triggers and one that triggers but doesn't help need
 different fixes.
+
+## Ablation
+
+`evalkit ablate suite.toml skill` runs the variant once more per piece, each
+time with one piece left out, and ranks the pieces by how much the pass rate
+drops without them. A skill's pieces are the `##` sections of its `SKILL.md`
+body (code fences are skipped) and each file beside it; a prompt's are its
+sections, its examples as one piece, and each document. A piece whose removal
+changes nothing is a candidate for cutting. Ablated skills are written to
+`.evalkit/ablate/` and keyed by content like any other run, so re-running costs
+nothing until the skill changes.
+
+## Gate
+
+`evalkit gate suite.toml BASE HEAD --max-drop 0.1` runs whatever is missing,
+compares HEAD with BASE, and exits 1 only when the whole 95% interval of the
+lift lies below `-0.1`, meaning HEAD is likely worse by more than 10 points. It
+also exits 1 when runs fail, since the result would be incomplete. Either side
+can be `variant@<git rev>`: the suite is checked out at that revision in a
+temporary `git worktree` and the variant is taken from there, while the cases
+always come from the current suite. So `gate suite.toml skill@main skill`
+checks a branch's edit to a skill against main. With few cases the interval is
+wide and a real drop can pass; `gate` warns when the interval is wider than
+twice the allowed drop.
 
 ## How runs work
 

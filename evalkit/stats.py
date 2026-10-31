@@ -90,3 +90,13 @@ def _case_rates(outcomes: Iterable[Outcome]) -> dict[str, float]:
 
 def _mean(values: Sequence[bool | float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def gate_passes(result: Comparison, max_drop: float) -> bool:
+    """Fail only when the whole interval sits below ``-max_drop``: a drop that big is likely."""
+    return result.high >= -max_drop
+
+
+def too_few_cases(result: Comparison, max_drop: float) -> bool:
+    """True when the interval is too wide for the gate to see a drop of *max_drop*."""
+    return result.high - result.low > 2 * max_drop

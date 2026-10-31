@@ -319,3 +319,11 @@ Where the code departs from the sections above, and why:
   with `git worktree add --detach` and removed afterwards; only the variant comes
   from it, the cases come from the current suite. Failed runs fail the gate
   rather than letting it decide on partial data.
+- **Cases on a repository** (added for the Expert-Agents reviewers): a case's
+  `checkout` is fetched by SHA from a local clone into the run's project, not
+  added as a worktree, so the run cannot reach later commits. The trace keeps
+  only files whose size or mtime differ from the checkout, so a large repository
+  does not fill the store. Suite `settings` become the project's
+  `.claude/settings.json`, which `--setting-sources project` loads; that is how
+  a suite sandboxes Bash. `${NAME}` expands from the environment at run time and
+  is not in the key, so a suite is portable across machines.

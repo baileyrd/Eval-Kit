@@ -35,6 +35,7 @@ class Outcome:
     passed: bool
     failed_checks: tuple[str, ...]
     triggered: bool | None  # None when the variant has no skill
+    checks: tuple[tuple[str, bool], ...] = ()  # each check's description and result
 
 
 @dataclass(frozen=True)
@@ -108,14 +109,18 @@ def score(jobs: Sequence[Job], store: JsonlStore, config: JudgeConfig) -> Scored
 def _outcome(job: Job, trace: Trace, found: dict[str, tuple[bool, str]]) -> Outcome:
     verdicts = {rubric: passed for rubric, (passed, _) in found.items()}
     failed = []
+    results = []
     for check in job.case.checks:
-        if check.passes(trace, verdicts):
+        passed = check.passes(trace, verdicts)
+        results.append((check.describe(), passed))
+        if passed:
             continue
         reason = f" ({found[check.rubric][1]})" if isinstance(check, checks.Judge) else ""
         failed.append(check.describe() + reason)
     skill = job.variant.skill
     triggered = None if skill is None else skill.name in trace.skills_invoked
-    return Outcome(job.variant.id, job.case.id, job.sample, not failed, tuple(failed), triggered)
+    return Outcome(job.variant.id, job.case.id, job.sample, not failed, tuple(failed), triggered,
+                   tuple(results))
 
 
 def _parallel(items: Sequence[Item], work: Callable[[Item], Result],

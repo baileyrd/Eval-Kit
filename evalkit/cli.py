@@ -54,6 +54,8 @@ def _parser() -> argparse.ArgumentParser:
     score_cmd = commands.add_parser("score", help="judge stored traces; no model calls")
     _suite_args(score_cmd)
     score_cmd.add_argument("--verbose", action="store_true", help="list each failed run")
+    score_cmd.add_argument("--by-check", action="store_true",
+                           help="each check's pass rate per variant and case")
     score_cmd.set_defaults(handler=_score)
 
     compare_cmd = commands.add_parser("compare", help="paired lift of HEAD over BASE")
@@ -220,6 +222,10 @@ def _score(args: argparse.Namespace) -> int:
         print(f"{row.variant:<20} {row.runs:>4}/{expected:<4} {row.pass_rate:>6.0%} {trigger:>10}")
     if scored.unjudged:
         print(f"{scored.unjudged} stored run(s) await a judge verdict; 'evalkit run' judges them")
+    if args.by_check:
+        for rate in stats.by_check(outcomes):
+            label = rate.check.splitlines()[0][:100]
+            print(f"  {rate.variant} {rate.case}: {rate.passed}/{rate.runs} {label}")
     if args.verbose:
         for o in outcomes:
             if not o.passed:

@@ -6,6 +6,8 @@ leaves the repository raises :class:`SpecError` with the file and the reason.
 
 from __future__ import annotations
 
+import json
+import re
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -18,6 +20,7 @@ EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 TARGETS = frozenset({"claude-code", "claude.ai", "api"})
 SKILL_FILE = "SKILL.md"
 SUITE_FILE = Path("evals") / "suite.toml"
+_SHA = re.compile(r"[0-9a-f]{40}")
 
 # Messages API fields that `claude -p` has no way to set. Rejected with a reason
 # rather than as merely unknown, so the author knows why.
@@ -91,11 +94,26 @@ class SkillSpec:
 
 
 @dataclass(frozen=True)
+class Checkout:
+    """A git commit the run starts from, fetched from a local clone.
+
+    ``source`` may name environment variables as ``${NAME}``, so a suite does not
+    hold one machine's paths; it is expanded at run time and is not part of the key.
+    """
+
+    source: str
+    head: str
+    base: str | None = None  # fetched too, so the run can diff against it
+    ref: str | None = None  # also points at head, e.g. refs/pull/12/head
+
+
+@dataclass(frozen=True)
 class Case:
     id: str
     input: str
     files: tuple[tuple[str, str], ...]
     checks: tuple[checks.Check, ...]
+    checkout: Checkout | None = None
 
 
 Subject = PromptSpec | SkillSpec
@@ -136,6 +154,7 @@ class Suite:
     variants: tuple[Variant, ...]
     cases: tuple[Case, ...]
     judge: JudgeConfig = JudgeConfig()
+    settings: str | None = None  # Claude Code settings JSON for every run, ${NAME} unexpanded
 
     def variant(self, variant_id: str) -> Variant:
         for variant in self.variants:
@@ -176,7 +195,8 @@ def load_skill_dir(root: Path, targets: frozenset[str]) -> SkillSpec:
 def load_suite(path: Path) -> Suite:
     """Read a whole suite: settings, variants and cases."""
     data = _read_toml(path)
-    _check_keys(path, data, {"samples", "allowed_tools", "timeout", "judge", "variant", "case"})
+    _check_keys(path, data, {"samples", "allowed_tools", "timeout", "judge", "settings",
+                             "variant", "case"})
     samples = data.get("samples", 1)
     if not isinstance(samples, int) or not 1 <= samples <= MAX_SAMPLES:
         raise SpecError(path, f"samples must be an integer from 1 to {MAX_SAMPLES}")
@@ -188,7 +208,23 @@ def load_suite(path: Path) -> Suite:
         raise SpecError(path, "define at least one [variant.<id>] table")
     variants = tuple(_variant(path, vid, raw) for vid, raw in raw_variants.items())
     return Suite(path, samples, tuple(_str_list(path, data, "allowed_tools", default=[])),
-                 timeout, variants, _cases(path, data), _judge(path, data.get("judge", {})))
+                 timeout, variants, _cases(path, data), _judge(path, data.get("judge", {})),
+                 _settings(path, data))
+
+
+def _settings(path: Path, data: dict[str, object]) -> str | None:
+    """Settings text, checked to be a JSON object; variables expand only at run time."""
+    raw = _optional_str(path, data, "settings")
+    if raw is None:
+        return None
+    text = _text(path, raw)
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise SpecError(path, f"settings is not JSON: {exc}") from None
+    if not isinstance(parsed, dict):
+        raise SpecError(path, "settings must be a JSON object")
+    return text
 
 
 def _judge(path: Path, raw: object) -> JudgeConfig:
@@ -298,7 +334,7 @@ def _example(path: Path, raw: dict[str, object]) -> Example:
 def _case(path: Path, raw: object) -> Case:
     if not isinstance(raw, dict):
         raise SpecError(path, "each [[case]] must be a table")
-    _check_keys(path, raw, {"id", "input", "files", "checks"}, where="[[case]]")
+    _check_keys(path, raw, {"id", "input", "files", "checks", "checkout"}, where="[[case]]")
     files = raw.get("files", {})
     if not isinstance(files, dict) or not all(isinstance(v, str) for v in files.values()):
         raise SpecError(path, "[[case]] files must map paths to strings")
@@ -311,7 +347,27 @@ def _case(path: Path, raw: object) -> Case:
     except ValueError as exc:
         raise SpecError(path, f"case {case_id!r}: {exc}") from None
     files = {name: _text(path, text) for name, text in files.items()}
-    return Case(case_id, _required_str(path, raw, "input"), tuple(sorted(files.items())), parsed)
+    return Case(case_id, _required_str(path, raw, "input"), tuple(sorted(files.items())), parsed,
+                _checkout(path, case_id, raw.get("checkout")))
+
+
+def _checkout(path: Path, case_id: str, raw: object) -> Checkout | None:
+    if raw is None:
+        return None
+    where = f"case {case_id!r} checkout"
+    if not isinstance(raw, dict):
+        raise SpecError(path, f"{where} must be a table")
+    _check_keys(path, raw, {"from", "head", "base", "ref"}, where=where)
+    commits = {k: _optional_str(path, raw, k) for k in ("head", "base")}
+    for key, sha in commits.items():
+        if sha is not None and not _SHA.fullmatch(sha):
+            raise SpecError(path, f"{where}: {key} must be a 40-character commit SHA")
+    if commits["head"] is None:
+        raise SpecError(path, f"{where}: head is required")
+    ref = _optional_str(path, raw, "ref")
+    if ref is not None and not ref.startswith("refs/"):
+        raise SpecError(path, f"{where}: ref must start with refs/")
+    return Checkout(_required_str(path, raw, "from"), commits["head"], commits["base"], ref)
 
 
 def _resources(root: Path) -> tuple[Resource, ...]:
@@ -386,14 +442,22 @@ def _tables(path: Path, data: dict[str, object], key: str) -> list[dict[str, obj
 
 
 def _text(path: Path, value: str) -> str:
-    """Inline text, or the contents of ``file:<relative path>``."""
-    if not value.startswith("file:"):
+    """Inline text, the contents of ``file:<relative path>``, or ``body:<relative path>``:
+    a Markdown file without its YAML frontmatter, such as a subagent definition."""
+    prefix = next((p for p in ("file:", "body:") if value.startswith(p)), None)
+    if prefix is None:
         return value
-    target = _resolve(path, value.removeprefix("file:"))
+    target = _resolve(path, value.removeprefix(prefix))
     try:
-        return target.read_text(encoding="utf-8")
+        text = target.read_text(encoding="utf-8")
     except OSError as exc:
         raise SpecError(path, f"cannot read {value}: {exc.strerror}") from None
+    if prefix == "file:":
+        return text
+    try:
+        return frontmatter.parse(text).body
+    except frontmatter.FrontmatterError as exc:
+        raise SpecError(path, f"{value}: {exc}") from None
 
 
 def _resolve(path: Path, relative: str) -> Path:

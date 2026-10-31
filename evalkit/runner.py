@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from evalkit import render
+from evalkit import checkout, render
 from evalkit.spec import Case, JudgeConfig, PromptSpec, Suite, Variant
 from evalkit.trace import ToolCall, Trace
 
@@ -62,12 +62,12 @@ _BASE_ARGV = (CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
 def command(variant: Variant, system_file: Path | None, allowed_tools: Iterable[str]) -> list[str]:
     """The argv for one run; the user turn goes on stdin. Pure, for testing."""
     argv = [*_BASE_ARGV, *_model_args(variant.model, variant.effort)]
+    tools = list(allowed_tools)
     if isinstance(variant.subject, PromptSpec):
         assert system_file is not None
         argv += ["--system-prompt-file", str(system_file), "--tools", ",".join(variant.subject.tools)]
-        return argv
+        return argv + (["--allowed-tools", ",".join(tools)] if tools else [])
     argv += ["--permission-mode", "acceptEdits"]
-    tools = list(allowed_tools)
     if tools:
         argv += ["--allowed-tools", ",".join(tools)]
     return argv
@@ -138,6 +138,7 @@ class CliRunner:
 
     def run(self, variant: Variant, case: Case) -> Trace:
         with _sandbox() as (root, project, env):
+            baseline = self._prepare_project(case, project)
             for name, text in case.files:
                 _write_inside(project, name, text)
             system_file = self._prepare_subject(variant, root, project)
@@ -150,7 +151,7 @@ class CliRunner:
                 final_text=parsed.final_text,
                 tool_calls=parsed.tool_calls,
                 skills_invoked=_skills_invoked(parsed.tool_calls),
-                files=_snapshot(project),
+                files=_snapshot(project, baseline),
                 input_tokens=parsed.input_tokens,
                 output_tokens=parsed.output_tokens,
                 cost_usd=parsed.cost_usd,
@@ -166,6 +167,20 @@ class CliRunner:
             if parsed.is_error:
                 raise RunError(f"judge call ended in error: {parsed.final_text[:200]}")
             return parsed.final_text
+
+    def _prepare_project(self, case: Case, project: Path) -> dict[str, tuple[int, int]]:
+        """Check out the case's commit and write the suite's settings. Returns the
+        checkout's files as they stood, so the trace keeps only what the run changed."""
+        try:
+            if case.checkout is not None:
+                checkout.materialise(case.checkout, project)
+            if self.suite.settings is not None:
+                target = project / ".claude" / "settings.json"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(checkout.expand(self.suite.settings), encoding="utf-8")
+        except checkout.CheckoutError as exc:
+            raise RunError(f"case {case.id!r}: {exc}") from None
+        return _stats(project) if case.checkout is not None else {}
 
     @staticmethod
     def _prepare_subject(variant: Variant, root: Path, project: Path) -> Path | None:
@@ -226,13 +241,29 @@ def _write_inside(project: Path, name: str, text: str) -> None:
     target.write_text(text, encoding="utf-8")
 
 
-def _snapshot(project: Path) -> tuple[tuple[str, str | None], ...]:
-    out: list[tuple[str, str | None]] = []
+def _project_files(project: Path) -> Iterator[tuple[str, Path]]:
     for path in sorted(project.rglob("*")):
         rel = path.relative_to(project)
-        if not path.is_file() or rel.parts[0] in _SKIP_IN_PROJECT:
+        if path.is_file() and rel.parts[0] not in _SKIP_IN_PROJECT:
+            yield rel.as_posix(), path
+
+
+def _stats(project: Path) -> dict[str, tuple[int, int]]:
+    out = {}
+    for rel, path in _project_files(project):
+        stat = path.stat()
+        out[rel] = (stat.st_size, stat.st_mtime_ns)
+    return out
+
+
+def _snapshot(project: Path, baseline: dict[str, tuple[int, int]]) -> tuple[tuple[str, str | None], ...]:
+    """Every file in the project except checkout files the run left as they were."""
+    out: list[tuple[str, str | None]] = []
+    for rel, path in _project_files(project):
+        stat = path.stat()
+        if baseline.get(rel) == (stat.st_size, stat.st_mtime_ns):
             continue
-        out.append((rel.as_posix(), _text_or_none(path)))
+        out.append((rel, _text_or_none(path)))
     return tuple(out)
 
 

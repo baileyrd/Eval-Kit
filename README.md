@@ -50,7 +50,37 @@ checks = [{ regex = "data-bind" }, { contains = "280", in = "index.html" }]
 
 Checks: `contains`, `regex` (both on the final text, or a file with `in`),
 `file_exists`, `tool_called`, `judge`, and `all` / `any` over a list of checks.
-A run passes when all of its case's checks pass.
+A run passes when all of its case's checks pass; `score --by-check` gives each
+check's own pass rate, for cases where each check is one thing to find.
+
+### Cases on a repository
+
+A case can start from a commit of a local clone instead of an empty project,
+for example to review a pull request at the head the reviewer saw:
+
+```toml
+settings = "file:review.settings.json"   # Claude Code settings for every run
+
+[[case]]
+id       = "pr-48"
+input    = "Review PR 48 against base 5d76260e at head 4771160b."
+checkout = { from = "${TARGET}", head = "<40-char sha>", base = "<40-char sha>", ref = "refs/pull/48/head" }
+checks   = [{ judge = "K1: names the tuple-slot alias" }]
+```
+
+The checkout is a new repository fetched by SHA from the clone: the head and its
+history, the base, nothing later, and an `origin` that is itself, holding `ref`.
+The trace keeps only the files the run added or changed, not the checkout.
+
+`settings` is written to the run's `.claude/settings.json`, so a suite can turn
+on Claude Code's sandbox, deny reads of paths that would give the answer away,
+and close the network. `${NAME}` in `from` and in `settings` is read from the
+environment at run time, and an unset one fails the run, since an empty path in
+a deny rule would deny nothing. Neither the clone's path nor the variables are
+part of the key; the commits and the settings text are.
+
+`allowed_tools` applies to prompt variants too, so a prompt with `tools =
+["Bash"]` can run Bash without asking.
 
 ## The judge
 
@@ -156,6 +186,8 @@ effort = "high"
 [[section]]
 name = "instructions"
 text = "file:reviewer/instructions.md"   # relative to this file, inside the repo
+# "body:agents/reviewer.md" reads a Markdown file without its YAML frontmatter,
+# such as a Claude Code subagent definition.
 
 [[example]]
 input  = "..."

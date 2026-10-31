@@ -53,6 +53,30 @@ def summarise(outcomes: Iterable[Outcome]) -> list[Summary]:
     return out
 
 
+@dataclass(frozen=True)
+class CheckRate:
+    variant: str
+    case: str
+    check: str
+    passed: int
+    runs: int
+
+
+def by_check(outcomes: Iterable[Outcome]) -> list[CheckRate]:
+    """How often each check of each case passed, per variant, in first-seen order.
+
+    A case passes only when every check does; when each check stands for one thing
+    to find, this is the hit rate of each, which the case's pass rate hides.
+    """
+    counts: dict[tuple[str, str, str], list[int]] = {}
+    for outcome in outcomes:
+        for check, passed in outcome.checks:
+            tally = counts.setdefault((outcome.variant, outcome.case, check), [0, 0])
+            tally[0] += passed
+            tally[1] += 1
+    return [CheckRate(v, c, check, p, n) for (v, c, check), (p, n) in counts.items()]
+
+
 def compare(outcomes: Sequence[Outcome], base: str, head: str) -> Comparison:
     base_rates = _case_rates(o for o in outcomes if o.variant == base)
     head_rates = _case_rates(o for o in outcomes if o.variant == head)

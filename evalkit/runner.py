@@ -14,12 +14,13 @@ import os
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from evalkit import render
-from evalkit.spec import Case, PromptSpec, Suite, Variant
+from evalkit.spec import Case, JudgeConfig, PromptSpec, Suite, Variant
 from evalkit.trace import ToolCall, Trace
 
 CLAUDE = "claude"
@@ -54,14 +55,13 @@ def cli_version() -> str:
     return done.stdout.strip()
 
 
+_BASE_ARGV = (CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
+              "--setting-sources", "project", "--strict-mcp-config", "--no-session-persistence")
+
+
 def command(variant: Variant, system_file: Path | None, allowed_tools: Iterable[str]) -> list[str]:
     """The argv for one run; the user turn goes on stdin. Pure, for testing."""
-    argv = [CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
-            "--setting-sources", "project", "--strict-mcp-config", "--no-session-persistence"]
-    if variant.model:
-        argv += ["--model", variant.model]
-    if variant.effort:
-        argv += ["--effort", variant.effort]
+    argv = [*_BASE_ARGV, *_model_args(variant.model, variant.effort)]
     if isinstance(variant.subject, PromptSpec):
         assert system_file is not None
         argv += ["--system-prompt-file", str(system_file), "--tools", ",".join(variant.subject.tools)]
@@ -71,6 +71,16 @@ def command(variant: Variant, system_file: Path | None, allowed_tools: Iterable[
     if tools:
         argv += ["--allowed-tools", ",".join(tools)]
     return argv
+
+
+def judge_command(judge: JudgeConfig, system_file: Path) -> list[str]:
+    """The argv for one judge call: a plain prompt with no tools."""
+    return [*_BASE_ARGV, *_model_args(judge.model, judge.effort),
+            "--system-prompt-file", str(system_file), "--tools", ""]
+
+
+def _model_args(model: str | None, effort: str | None) -> list[str]:
+    return [*(["--model", model] if model else []), *(["--effort", effort] if effort else [])]
 
 
 def parse_stream(lines: Iterable[str]) -> Parsed:
@@ -127,12 +137,7 @@ class CliRunner:
         self.suite_skills = tuple(v.skill.name for v in suite.variants if v.skill)
 
     def run(self, variant: Variant, case: Case) -> Trace:
-        with tempfile.TemporaryDirectory(prefix="evalkit-") as tmp:
-            root = Path(tmp)
-            project, config = root / "project", root / "config"
-            project.mkdir()
-            config.mkdir()
-            env = _auth_env(config)
+        with _sandbox() as (root, project, env):
             for name, text in case.files:
                 _write_inside(project, name, text)
             system_file = self._prepare_subject(variant, root, project)
@@ -151,6 +156,16 @@ class CliRunner:
                 cost_usd=parsed.cost_usd,
                 duration_ms=parsed.duration_ms,
             )
+
+    def ask(self, judge: JudgeConfig, system: str, user_text: str) -> str:
+        """One tool-less prompt to the judge model; returns its reply text."""
+        with _sandbox() as (root, project, env):
+            system_file = root / "judge.md"
+            system_file.write_text(system, encoding="utf-8")
+            parsed = self._invoke(judge_command(judge, system_file), user_text, project, env)
+            if parsed.is_error:
+                raise RunError(f"judge call ended in error: {parsed.final_text[:200]}")
+            return parsed.final_text
 
     @staticmethod
     def _prepare_subject(variant: Variant, root: Path, project: Path) -> Path | None:
@@ -175,6 +190,17 @@ class CliRunner:
         if done.returncode != 0 and not done.stdout.strip():
             raise RunError(f"{CLAUDE} exited {done.returncode}: {done.stderr.strip()[:300]}")
         return parse_stream(done.stdout.splitlines())
+
+
+@contextmanager
+def _sandbox() -> Iterator[tuple[Path, Path, dict[str, str]]]:
+    """A temp root holding an empty project and a private config dir with the login."""
+    with tempfile.TemporaryDirectory(prefix="evalkit-") as tmp:
+        root = Path(tmp)
+        project, config = root / "project", root / "config"
+        project.mkdir()
+        config.mkdir()
+        yield root, project, _auth_env(config)
 
 
 def _auth_env(config: Path) -> dict[str, str]:

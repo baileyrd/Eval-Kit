@@ -1,6 +1,6 @@
 # evalkit: a modular eval kit for prompts and skills
 
-Status: accepted 2026-10-31; phases 1 and 2 built (see §13 for where the code departs). This version
+Status: accepted 2026-10-31; phases 1 to 3 built (see §13 for where the code departs). This version
 folds in the Elephant Goldfish review (`egm-review.md`) and the owner's decision that
 prompt specs carry only the fields the Claude CLI can apply. Each fix is tagged with
 the review's finding id: B = blocker, M = major, m = minor, n = nit.
@@ -284,7 +284,7 @@ evalkit/
 - Prompting best practices: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices
 - Claude Code CLI 2.1.314 `--help`: `--bare`, `--system-prompt-file`, `--tools`, `--setting-sources`, `--strict-mcp-config`, `setup-token`
 
-## 13. Implementation notes (phases 1 and 2)
+## 13. Implementation notes (phases 1 to 3)
 
 Where the code departs from the sections above, and why:
 
@@ -302,4 +302,12 @@ Where the code departs from the sections above, and why:
   load in every variant, which is fair because they load in all of them.
 - **No fake runner module.** Tests pass a small fake that satisfies the `Runner`
   protocol directly.
+- **Judge checks take cached verdicts.** `Check.passes(trace, verdicts)`; `run`
+  fills the cache, `score` only reads it. A verdict's key covers the rubric,
+  judge model and effort, and the full trace. The judge model is a suite-level
+  `[judge]` setting defaulting to Sonnet; it is not forced to differ from the
+  subject's model, since a variant using the CLI default model can't be checked.
+- **Calibration labels** are addressed by variant, case, sample and rubric
+  rather than by trace key, so a person can read and edit them. `calibrate`
+  writes the template itself when the labels file doesn't exist.
 

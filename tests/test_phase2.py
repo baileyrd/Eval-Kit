@@ -49,17 +49,18 @@ class ChecksTest(unittest.TestCase):
                    {"any": [{"contains": "nope"}, {"contains": "OK"}]}]
         for raw in passing:
             with self.subTest(raw=raw):
-                self.assertTrue(checks.parse(raw).passes(t))
+                self.assertTrue(checks.parse(raw).passes(t, {}))
         failing = [{"contains": "nope"}, {"regex": "x+y"}, {"contains": "x", "in": "missing.md"},
                    {"file_exists": "missing.md"}, {"tool_called": "Bash"},
                    {"all": [{"contains": "all"}, {"contains": "nope"}]}]
         for raw in failing:
             with self.subTest(raw=raw):
-                self.assertFalse(checks.parse(raw).passes(t))
+                self.assertFalse(checks.parse(raw).passes(t, {}))
 
     def test_rejects_malformed_checks(self) -> None:
         bad = [{}, {"contains": "a", "regex": "b"}, {"contains": ""}, {"regex": "("},
-               {"file_exists": "a", "in": "b"}, {"all": []}, {"judge": "x"}, {"contains": 3}]
+               {"file_exists": "a", "in": "b"}, {"all": []}, {"judge": ""}, {"vibe": "x"},
+               {"contains": 3}]
         for raw in bad:
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 checks.parse(raw)
@@ -85,7 +86,8 @@ class SuiteTest(TempDirTest):
             "no variants": '[[case]]\nid = "a"\ninput = "x"\n',
             "no cases": "[variant.control]\n",
             "samples": 'samples = 0\n[variant.control]\n[[case]]\nid = "a"\ninput = "x"\n',
-            "check": '[variant.control]\n[[case]]\nid = "a"\ninput = "x"\nchecks = [{ judge = "x" }]\n',
+            "check": '[variant.control]\n[[case]]\nid = "a"\ninput = "x"\nchecks = [{ vibe = "x" }]\n',
+            "judge": '[judge]\neffort = "huge"\n[variant.control]\n[[case]]\nid = "a"\ninput = "x"\n',
         }
         for label, text in bad.items():
             with self.subTest(label), self.assertRaises(SpecError):
@@ -222,13 +224,13 @@ class EngineAndStatsTest(TempDirTest):
         jobs = plan.jobs(suite)
         events: list[tuple[str, bool]] = []
         failures = engine.execute(engine.pending(jobs, store, "v1"), FakeRunner(), store, "v1", 1,
-                                  lambda job, err: events.append((job.key, err is None)))
+                                  lambda label, err: events.append((label, err is None)))
         self.assertEqual((failures, len(events)), (1, 8))
         self.assertEqual(len(engine.pending(jobs, store, "v1")), 1)  # the failure retries
         self.assertEqual(len(engine.pending(jobs, store, "v2")), 8)  # new CLI re-runs all
         engine.execute(engine.pending(jobs, store, "v1"), FakeRunner(), store, "v1", 1,
                        lambda *_: None)
-        outcomes = engine.score(jobs, store)
+        outcomes = engine.score(jobs, store, suite.judge).outcomes
         self.assertEqual(len(outcomes), 8)
         summary = {s.variant: s for s in stats.summarise(outcomes)}
         self.assertIsNone(summary["control"].trigger_rate)

@@ -1,6 +1,6 @@
 # evalkit: a modular eval kit for prompts and skills
 
-Status: accepted 2026-10-31; phase 1 in progress. This version
+Status: accepted 2026-10-31; phases 1 and 2 built (see §13 for where the code departs). This version
 folds in the Elephant Goldfish review (`egm-review.md`) and the owner's decision that
 prompt specs carry only the fields the Claude CLI can apply. Each fix is tagged with
 the review's finding id: B = blocker, M = major, m = minor, n = nit.
@@ -283,3 +283,23 @@ evalkit/
 - Skill authoring best practices: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
 - Prompting best practices: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices
 - Claude Code CLI 2.1.314 `--help`: `--bare`, `--system-prompt-file`, `--tools`, `--setting-sources`, `--strict-mcp-config`, `setup-token`
+
+## 13. Implementation notes (phases 1 and 2)
+
+Where the code departs from the sections above, and why:
+
+- **`skill_triggered` is not a check.** It would always fail for the control and
+  inflate lift. Trigger rate is reported for every skill variant instead, with
+  lift recomputed on triggered runs only (§7).
+- **The CLI version is stored with each trace, not hashed into the key.** `run`
+  re-runs any trace whose version differs, and `score`/`compare` can still find
+  traces without asking the CLI its version.
+- **Permissions are suite-level.** `allowed_tools` applies to every variant so a
+  pair differs only in its subject; edits are always allowed (`acceptEdits`).
+- **Login**: `CLAUDE_CODE_OAUTH_TOKEN` if set, else a copy of
+  `.credentials.json` into the run's config dir. The P2 spike confirmed this
+  isolates user skills and still authenticates; bundled Claude Code skills still
+  load in every variant, which is fair because they load in all of them.
+- **No fake runner module.** Tests pass a small fake that satisfies the `Runner`
+  protocol directly.
+

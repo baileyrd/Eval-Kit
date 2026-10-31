@@ -40,7 +40,7 @@ def render_suite(skill: SkillSpec) -> str:
             "[[case]]",
             f'id     = "case-{number}"',
             f"input  = {_toml_string(f'TODO: a realistic request. Hint: {hint}')}",
-            "checks = [{ skill_triggered = {} }]",
+            "checks = []                  # TODO, e.g. { regex = \"...\" }, { file_exists = \"out.md\" }",
         ]
     return "\n".join(lines) + "\n"
 

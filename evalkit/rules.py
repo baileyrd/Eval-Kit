@@ -231,6 +231,10 @@ def skill_cases(ctx: LintContext) -> Iterator[Finding]:
     elif len(ctx.cases) < MIN_CASES:
         yield _finding("skill.cases", Severity.WARN, where,
                        f"{len(ctx.cases)} eval case(s); write at least {MIN_CASES}", AUTHORING)
+    unchecked = [case.id for case in ctx.cases or () if not case.checks]
+    if unchecked:
+        yield _finding("skill.cases", Severity.WARN, where,
+                       f"case(s) with no checks pass vacuously: {', '.join(unchecked)}", AUTHORING)
 
 
 # --- prompt rules ------------------------------------------------------------

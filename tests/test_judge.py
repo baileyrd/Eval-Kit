@@ -7,7 +7,7 @@ import unittest
 
 from evalkit import checks, engine, judge, plan
 from evalkit.cli import main
-from evalkit.spec import JudgeConfig, load_suite
+from evalkit.spec import Case, JudgeConfig, Variant, load_suite
 from evalkit.store import JsonlStore, Record
 from evalkit.trace import Trace
 from tests.helpers import TempDirTest
@@ -44,6 +44,13 @@ class FakeJudge:
         self.calls += 1
         passed = "red" in user_text.split("<final_reply>")[1]
         return f'Sure. {{"reason": "checked", "pass": {json.dumps(passed)}}}'
+
+
+class ReplyRunner:
+    """The skill variant mentions red; the control doesn't."""
+
+    def run(self, variant: Variant, case: Case) -> Trace:
+        return trace("a red widget" if variant.id == "skill" else "a widget")
 
 
 class PureTest(unittest.TestCase):
@@ -139,6 +146,31 @@ class JudgingFlowTest(TempDirTest):
         self.assertIn("1/2 agree (50%)", out)
         self.assertIn("too strict 1", out)
         self.assertIn("control one #0", out)
+
+    def test_runs_are_judged_as_they_finish(self) -> None:
+        store = JsonlStore(self.root / "fresh.jsonl")
+        fake = FakeJudge()
+        failures = engine.execute(self.jobs, ReplyRunner(), store, "v1", 2, lambda *_: None,
+                                  judging=(fake, self.suite.judge))
+        self.assertEqual((failures, fake.calls), (0, 2))
+        self.assertEqual(judge.pending(self.jobs, store, self.suite.judge), [])
+        passed = {o.variant: o.passed for o in engine.score(self.jobs, store, self.suite.judge).outcomes}
+        self.assertEqual(passed, {"control": False, "skill": True})
+
+    def test_failed_judge_call_keeps_the_trace(self) -> None:
+        class Mumbler:
+            def ask(self, config: JudgeConfig, system: str, user_text: str) -> str:
+                return "no verdict here"
+
+        store = JsonlStore(self.root / "fresh.jsonl")
+        errors: list[Exception | None] = []
+        failures = engine.execute(self.jobs, ReplyRunner(), store, "v1", 1,
+                                  lambda _, err: errors.append(err),
+                                  judging=(Mumbler(), self.suite.judge))
+        self.assertEqual(failures, 2)
+        self.assertTrue(all(isinstance(e, engine.JudgeFailed) for e in errors))
+        self.assertEqual(engine.pending(self.jobs, store, "v1"), [])
+        self.assertEqual(len(judge.pending(self.jobs, store, self.suite.judge)), 2)
 
     def cli(self, *argv: str) -> tuple[int, str]:
         out = io.StringIO()

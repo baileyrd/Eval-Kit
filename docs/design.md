@@ -284,7 +284,7 @@ evalkit/
 - Prompting best practices: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices
 - Claude Code CLI 2.1.314 `--help`: `--bare`, `--system-prompt-file`, `--tools`, `--setting-sources`, `--strict-mcp-config`, `setup-token`
 
-## 13. Implementation notes (phases 1 to 3)
+## 13. Implementation notes
 
 Where the code departs from the sections above, and why:
 
@@ -310,4 +310,12 @@ Where the code departs from the sections above, and why:
 - **Calibration labels** are addressed by variant, case, sample and rubric
   rather than by trace key, so a person can read and edit them. `calibrate`
   writes the template itself when the labels file doesn't exist.
-
+- **Ablation pieces** are a skill's `##` sections (ending at the next `#` or `##`
+  heading, ignoring fenced code) and its files outside `evals/`; a prompt's
+  sections, examples as one piece, and documents. Ablated skills are copied to
+  `.evalkit/ablate/<variant>/<piece>/` so the runner and the content key treat
+  them like any skill. `lint` skips `.evalkit/`.
+- **`gate` sides are variants**, optionally `id@rev`. The rev is checked out
+  with `git worktree add --detach` and removed afterwards; only the variant comes
+  from it, the cases come from the current suite. Failed runs fail the gate
+  rather than letting it decide on partial data.

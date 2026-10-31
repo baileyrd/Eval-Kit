@@ -39,7 +39,7 @@ def job_key(suite: Suite, variant: Variant, digest: str, case: Case, sample: int
     The Claude CLI version is deliberately not part of the key: it is stored with
     each trace, and ``run`` re-runs a trace made by a different version.
     """
-    payload = {
+    payload: dict[str, object] = {
         "subject": digest,
         "model": variant.model,
         "effort": variant.effort,
@@ -48,6 +48,10 @@ def job_key(suite: Suite, variant: Variant, digest: str, case: Case, sample: int
         "files": case.files,
         "sample": sample,
     }
+    if case.checkout is not None:  # its source is a local path, so only the commits count
+        payload["checkout"] = [case.checkout.head, case.checkout.base, case.checkout.ref]
+    if suite.settings is not None:
+        payload["settings"] = suite.settings
     return _sha(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode())
 
 

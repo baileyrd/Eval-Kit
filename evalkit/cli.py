@@ -1,15 +1,15 @@
-"""Command line: lint, init, run, score, compare."""
+"""Command line: lint, init, run, score, compare, calibrate."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict
 from pathlib import Path
 
-from evalkit import engine, lint, plan, render, rules, scaffold, stats
+from evalkit import engine, judge, lint, plan, render, rules, scaffold, stats
 from evalkit.runner import CliRunner, RunError, cli_version
 from evalkit.spec import (SKILL_FILE, SUITE_FILE, Case, SkillSpec, SpecError, Suite, Variant,
                           load_cases,
@@ -44,7 +44,8 @@ def _parser() -> argparse.ArgumentParser:
     init_cmd.add_argument("--force", action="store_true", help="overwrite an existing suite")
     init_cmd.set_defaults(handler=_init)
 
-    run_cmd = commands.add_parser("run", help="run the jobs a suite has no stored trace for")
+    run_cmd = commands.add_parser("run", help="run what has no stored trace, then judge "
+                                             "what has no cached verdict")
     _suite_args(run_cmd)
     run_cmd.add_argument("--jobs", type=int, default=1, help="runs in parallel (default 1)")
     run_cmd.add_argument("--yes", action="store_true",
@@ -61,6 +62,12 @@ def _parser() -> argparse.ArgumentParser:
     compare_cmd.add_argument("base")
     compare_cmd.add_argument("head")
     compare_cmd.set_defaults(handler=_compare)
+
+    calibrate_cmd = commands.add_parser(
+        "calibrate", help="check the judge against your labels (writes a template first)")
+    _suite_args(calibrate_cmd)
+    calibrate_cmd.add_argument("labels", type=Path, help="labels JSONL file")
+    calibrate_cmd.set_defaults(handler=_calibrate)
     return parser
 
 
@@ -148,17 +155,26 @@ def _run(args: argparse.Namespace) -> int:
     print(f"{len(jobs)} runs in the suite, {len(todo)} to do ({version})")
     if len(todo) > CONFIRM_ABOVE and not args.yes:
         return _fail(f"{len(todo)} runs is more than {CONFIRM_ABOVE}; pass --yes to go ahead")
-    done = 0
-
-    def report(job: plan.Job, error: Exception | None) -> None:
-        nonlocal done
-        done += 1
-        status = "ok" if error is None else f"FAILED: {error}"
-        print(f"[{done}/{len(todo)}] {job.variant.id} {job.case.id} #{job.sample}: {status}")
-
-    failures = engine.execute(todo, CliRunner(suite), store, version, max(1, args.jobs), report)
+    runner = CliRunner(suite)
+    failures = engine.execute(todo, runner, store, version, args.jobs, _progress(len(todo)))
+    to_judge = judge.pending(jobs, store, suite.judge)
+    if to_judge:
+        print(f"{len(to_judge)} judge call(s) with {suite.judge.model}")
+        failures += engine.execute_judging(to_judge, runner, suite.judge, store, args.jobs,
+                                           _progress(len(to_judge)))
     print(f"stored in {store.path}; {failures} failed (re-run to retry them)")
     return 1 if failures else 0
+
+
+def _progress(total: int) -> Callable[[str, Exception | None], None]:
+    done = 0
+
+    def report(label: str, error: Exception | None) -> None:
+        nonlocal done
+        done += 1
+        print(f"[{done}/{total}] {label}: {'ok' if error is None else f'FAILED: {error}'}")
+
+    return report
 
 
 def _score(args: argparse.Namespace) -> int:
@@ -166,12 +182,15 @@ def _score(args: argparse.Namespace) -> int:
         suite, store, jobs = _load(args)
     except (SpecError, ValueError) as exc:
         return _fail(exc)
-    outcomes = engine.score(jobs, store)
+    scored = engine.score(jobs, store, suite.judge)
+    outcomes = scored.outcomes
     expected = len(suite.cases) * suite.samples
     print(f"{'variant':<20} {'runs':>9} {'pass':>6} {'triggered':>10}")
     for row in stats.summarise(outcomes):
         trigger = "-" if row.trigger_rate is None else f"{row.trigger_rate:.0%}"
         print(f"{row.variant:<20} {row.runs:>4}/{expected:<4} {row.pass_rate:>6.0%} {trigger:>10}")
+    if scored.unjudged:
+        print(f"{scored.unjudged} stored run(s) await a judge verdict; 'evalkit run' judges them")
     if args.verbose:
         for o in outcomes:
             if not o.passed:
@@ -184,7 +203,7 @@ def _compare(args: argparse.Namespace) -> int:
         suite, store, jobs = _load(args)
         base, head = suite.variant(args.base), suite.variant(args.head)
         _require_same_inputs(suite, base, head)
-        result = stats.compare(engine.score(jobs, store), base.id, head.id)
+        result = stats.compare(engine.score(jobs, store, suite.judge).outcomes, base.id, head.id)
     except (SpecError, ValueError) as exc:
         return _fail(exc)
     print(f"{head.id} vs {base.id} over {result.cases} case(s)")
@@ -204,6 +223,82 @@ def _require_same_inputs(suite: Suite, base: Variant, head: Variant) -> None:
             raise ValueError(f"{base.id!r} and {head.id!r} send different input for case "
                              f"{case.id!r}; compare a prompt against a baseline prompt that "
                              "uses the same [user] template and documents")
+
+
+def _calibrate(args: argparse.Namespace) -> int:
+    try:
+        suite, store, jobs = _load(args)
+        if not args.labels.exists():
+            count = _write_label_template(args.labels, jobs, store, suite)
+            print(f"wrote {count} judged verdict(s) to {args.labels}; set each \"label\" to "
+                  "true or false (or delete the line), then run calibrate again")
+            return 0
+        pairs, disagreements = _labelled_pairs(args.labels, jobs, store, suite)
+    except (SpecError, ValueError, OSError) as exc:
+        return _fail(exc)
+    result = judge.agreement(pairs)
+    print(f"{result.agreed}/{result.labelled} agree ({result.rate:.0%}); judge too lenient "
+          f"{result.judge_too_lenient}, too strict {result.judge_too_strict}")
+    for line in disagreements:
+        print(f"  {line}")
+    return 0
+
+
+def _label_rows(jobs: Sequence[plan.Job], store: JsonlStore,
+                suite: Suite) -> Iterator[tuple[dict[str, object], bool, str, str]]:
+    """Each cached verdict as (row identity, judge verdict, judge reason, reply excerpt)."""
+    for job in jobs:
+        record = store.get(job.key)
+        if record is None:
+            continue
+        for rubric, (passed, reason) in (judge.verdicts_for(job, record.trace, store, suite.judge)
+                                         or {}).items():
+            row: dict[str, object] = {"variant": job.variant.id, "case": job.case.id,
+                                      "sample": job.sample, "rubric": rubric}
+            yield row, passed, reason, record.trace.final_text[:300]
+
+
+def _write_label_template(path: Path, jobs: Sequence[plan.Job], store: JsonlStore,
+                          suite: Suite) -> int:
+    lines = []
+    for row, passed, reason, excerpt in _label_rows(jobs, store, suite):
+        lines.append(json.dumps({**row, "label": None, "judge": passed, "reason": reason,
+                                 "excerpt": excerpt}, ensure_ascii=False))
+    if not lines:
+        raise ValueError("no judged runs yet; add judge checks and run the suite first")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(lines)
+
+
+def _labelled_pairs(path: Path, jobs: Sequence[plan.Job], store: JsonlStore,
+                    suite: Suite) -> tuple[list[tuple[bool, bool]], list[str]]:
+    judged = {_row_id(row): (passed, reason)
+              for row, passed, reason, _ in _label_rows(jobs, store, suite)}
+    pairs: list[tuple[bool, bool]] = []
+    disagreements: list[str] = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        label = row.get("label")
+        if label is None:
+            continue
+        if not isinstance(label, bool):
+            raise ValueError(f"{path}:{number}: label must be true, false or null")
+        found = judged.get(_row_id(row))
+        if found is None:
+            raise ValueError(f"{path}:{number}: no current judge verdict for this row "
+                             "(the trace or rubric changed since the template was written)")
+        pairs.append((found[0], label))
+        if found[0] != label:
+            disagreements.append(f"{row['variant']} {row['case']} #{row['sample']} "
+                                 f"{row['rubric'][:50]!r}: judge {found[0]}, you {label} "
+                                 f"({found[1]})")
+    return pairs, disagreements
+
+
+def _row_id(row: dict[str, object]) -> tuple[str, str, str, str]:
+    return (str(row["variant"]), str(row["case"]), str(row["sample"]), str(row["rubric"]))
 
 
 def _fail(error: object) -> int:

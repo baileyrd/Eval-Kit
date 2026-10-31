@@ -1,13 +1,17 @@
-"""Code checks: pure judgements of a trace.
+"""Checks: pure judgements of a trace.
 
 A check is written in a suite as an inline table, for example
 ``{ regex = "data-bind" }`` or ``{ contains = "OK", in = "out.txt" }``.
 :func:`parse` turns that table into a typed check, or raises ``ValueError``.
+
+A ``judge`` check is pure too: it reads a verdict a model already gave and the
+store cached (see :mod:`evalkit.judge`), passed in as ``verdicts``.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from evalkit.trace import Trace
@@ -18,7 +22,7 @@ class Contains:
     needle: str
     target: str | None  # None = the final text; otherwise a file path
 
-    def passes(self, trace: Trace) -> bool:
+    def passes(self, trace: Trace, verdicts: Mapping[str, bool]) -> bool:
         text = _target_text(trace, self.target)
         return text is not None and self.needle in text
 
@@ -31,7 +35,7 @@ class Regex:
     pattern: str
     target: str | None
 
-    def passes(self, trace: Trace) -> bool:
+    def passes(self, trace: Trace, verdicts: Mapping[str, bool]) -> bool:
         text = _target_text(trace, self.target)
         return text is not None and re.search(self.pattern, text, re.MULTILINE) is not None
 
@@ -43,7 +47,7 @@ class Regex:
 class FileExists:
     path: str
 
-    def passes(self, trace: Trace) -> bool:
+    def passes(self, trace: Trace, verdicts: Mapping[str, bool]) -> bool:
         return trace.has_file(self.path)
 
     def describe(self) -> str:
@@ -54,7 +58,7 @@ class FileExists:
 class ToolCalled:
     name: str
 
-    def passes(self, trace: Trace) -> bool:
+    def passes(self, trace: Trace, verdicts: Mapping[str, bool]) -> bool:
         return any(call.name == self.name for call in trace.tool_calls)
 
     def describe(self) -> str:
@@ -65,8 +69,8 @@ class ToolCalled:
 class AllOf:
     checks: tuple[Check, ...]
 
-    def passes(self, trace: Trace) -> bool:
-        return all(check.passes(trace) for check in self.checks)
+    def passes(self, trace: Trace, verdicts: Mapping[str, bool]) -> bool:
+        return all(check.passes(trace, verdicts) for check in self.checks)
 
     def describe(self) -> str:
         return "all(" + "; ".join(c.describe() for c in self.checks) + ")"
@@ -76,14 +80,34 @@ class AllOf:
 class AnyOf:
     checks: tuple[Check, ...]
 
-    def passes(self, trace: Trace) -> bool:
-        return any(check.passes(trace) for check in self.checks)
+    def passes(self, trace: Trace, verdicts: Mapping[str, bool]) -> bool:
+        return any(check.passes(trace, verdicts) for check in self.checks)
 
     def describe(self) -> str:
         return "any(" + "; ".join(c.describe() for c in self.checks) + ")"
 
 
-Check = Contains | Regex | FileExists | ToolCalled | AllOf | AnyOf
+@dataclass(frozen=True)
+class Judge:
+    rubric: str
+
+    def passes(self, trace: Trace, verdicts: Mapping[str, bool]) -> bool:
+        return verdicts[self.rubric]
+
+    def describe(self) -> str:
+        return f"judge: {self.rubric}"
+
+
+Check = Contains | Regex | FileExists | ToolCalled | AllOf | AnyOf | Judge
+
+
+def rubrics(check: Check) -> tuple[str, ...]:
+    """Every judge rubric in *check*, including inside all/any."""
+    if isinstance(check, Judge):
+        return (check.rubric,)
+    if isinstance(check, (AllOf, AnyOf)):
+        return tuple(r for child in check.checks for r in rubrics(child))
+    return ()
 
 
 def parse(raw: dict[str, object]) -> Check:
@@ -115,8 +139,10 @@ def parse(raw: dict[str, object]) -> Check:
         return FileExists(value)
     if kind == "tool_called":
         return ToolCalled(value)
+    if kind == "judge":
+        return Judge(value)
     raise ValueError(f"unknown check '{kind}'; use contains, regex, file_exists, tool_called, "
-                     "all or any")
+                     "judge, all or any")
 
 
 def _target_text(trace: Trace, target: str | None) -> str | None:

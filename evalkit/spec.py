@@ -119,6 +119,15 @@ class Variant:
 
 
 @dataclass(frozen=True)
+class JudgeConfig:
+    """The model that grades ``judge`` checks. Defaults to a model unlikely to be
+    the one under test, since a judge tends to favour its own model's output."""
+
+    model: str = "claude-sonnet-5-5"
+    effort: str = "low"
+
+
+@dataclass(frozen=True)
 class Suite:
     path: Path
     samples: int
@@ -126,6 +135,7 @@ class Suite:
     timeout_s: int
     variants: tuple[Variant, ...]
     cases: tuple[Case, ...]
+    judge: JudgeConfig = JudgeConfig()
 
     def variant(self, variant_id: str) -> Variant:
         for variant in self.variants:
@@ -166,7 +176,7 @@ def load_skill_dir(root: Path, targets: frozenset[str]) -> SkillSpec:
 def load_suite(path: Path) -> Suite:
     """Read a whole suite: settings, variants and cases."""
     data = _read_toml(path)
-    _check_keys(path, data, {"samples", "allowed_tools", "timeout", "variant", "case"})
+    _check_keys(path, data, {"samples", "allowed_tools", "timeout", "judge", "variant", "case"})
     samples = data.get("samples", 1)
     if not isinstance(samples, int) or not 1 <= samples <= MAX_SAMPLES:
         raise SpecError(path, f"samples must be an integer from 1 to {MAX_SAMPLES}")
@@ -178,7 +188,17 @@ def load_suite(path: Path) -> Suite:
         raise SpecError(path, "define at least one [variant.<id>] table")
     variants = tuple(_variant(path, vid, raw) for vid, raw in raw_variants.items())
     return Suite(path, samples, tuple(_str_list(path, data, "allowed_tools", default=[])),
-                 timeout, variants, _cases(path, data))
+                 timeout, variants, _cases(path, data), _judge(path, data.get("judge", {})))
+
+
+def _judge(path: Path, raw: object) -> JudgeConfig:
+    if not isinstance(raw, dict):
+        raise SpecError(path, "[judge] must be a table")
+    _check_keys(path, raw, {"model", "effort"}, where="[judge]")
+    _check_effort(path, raw.get("effort"))
+    default = JudgeConfig()
+    return JudgeConfig(_optional_str(path, raw, "model") or default.model,
+                       _optional_str(path, raw, "effort") or default.effort)
 
 
 def load_cases(path: Path) -> tuple[Case, ...]:

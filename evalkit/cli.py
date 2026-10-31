@@ -19,6 +19,7 @@ from evalkit.store import JsonlStore
 
 SKIP_DIRS = frozenset({".git", ".evalkit", "node_modules", "__pycache__", ".venv"})
 CONFIRM_ABOVE = 50  # jobs; more than this needs --yes
+DEFAULT_JOBS = 4  # past ~4-6, subscription rate limits fail runs rather than speed them up
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -96,7 +97,9 @@ def _suite_args(command: argparse.ArgumentParser) -> None:
 
 
 def _run_args(command: argparse.ArgumentParser) -> None:
-    command.add_argument("--jobs", type=int, default=1, help="runs in parallel (default 1)")
+    command.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
+                         help=f"runs in parallel (default {DEFAULT_JOBS}); each run judges "
+                              "its own trace as soon as it ends")
     command.add_argument("--yes", action="store_true",
                          help=f"don't stop when more than {CONFIRM_ABOVE} runs are needed")
 
@@ -180,14 +183,16 @@ def _run(args: argparse.Namespace) -> int:
 
 def _execute(suite: Suite, store: JsonlStore, jobs: Sequence[plan.Job],
              args: argparse.Namespace) -> int:
-    """Run the jobs with no current trace, then judge what has no verdict. Returns failures."""
+    """Run the jobs with no current trace, judging each as it ends, then judge any
+    stored trace still missing a verdict. Returns failures."""
     version = cli_version()
     todo = engine.pending(jobs, store, version)
     print(f"{len(jobs)} runs, {len(todo)} to do ({version})")
     if len(todo) > CONFIRM_ABOVE and not args.yes:
         raise ValueError(f"{len(todo)} runs is more than {CONFIRM_ABOVE}; pass --yes to go ahead")
     runner = CliRunner(suite)
-    failures = engine.execute(todo, runner, store, version, args.jobs, _progress(len(todo)))
+    failures = engine.execute(todo, runner, store, version, args.jobs, _progress(len(todo)),
+                              judging=(runner, suite.judge))
     to_judge = judge.pending(jobs, store, suite.judge)
     if to_judge:
         print(f"{len(to_judge)} judge call(s) with {suite.judge.model}")

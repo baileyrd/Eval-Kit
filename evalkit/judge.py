@@ -86,12 +86,17 @@ def pending(jobs: Iterable[Job], store: JsonlStore, judge: JudgeConfig) -> list[
         record = store.get(job.key)
         if record is None:
             continue
-        for rubric in _case_rubrics(job):
-            key = verdict_key(rubric, judge, record.trace)
-            if store.get_verdict(key) is None and key not in out:
-                label = f"{job.variant.id} {job.case.id} #{job.sample}"
-                out[key] = JudgeJob(key, rubric, record.trace, label)
+        for item in jobs_for(job, record.trace, judge):
+            if store.get_verdict(item.key) is None:
+                out.setdefault(item.key, item)
     return list(out.values())
+
+
+def jobs_for(job: Job, trace: Trace, judge: JudgeConfig) -> list[JudgeJob]:
+    """One judge call per rubric of the job's case, for *trace*."""
+    label = f"{job.variant.id} {job.case.id} #{job.sample}"
+    return [JudgeJob(verdict_key(rubric, judge, trace), rubric, trace, label)
+            for rubric in _case_rubrics(job)]
 
 
 def verdicts_for(job: Job, trace: Trace, store: JsonlStore,

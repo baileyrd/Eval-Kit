@@ -19,7 +19,7 @@ python3 -m evalkit lint my.prompt.toml my.skill.toml  # subject files
 python3 -m evalkit lint skills/ --min-severity warn --format json
 python3 -m evalkit init path/to/skill                 # writes evals/suite.toml
 
-python3 -m evalkit run     suite.toml [--jobs 4]      # runs only what isn't stored yet
+python3 -m evalkit run     suite.toml [--jobs 4]      # runs only what isn't stored yet; 4 at a time by default
 python3 -m evalkit score   suite.toml [--verbose]     # pass and trigger rates; no model calls
 python3 -m evalkit compare suite.toml control skill   # paired lift with a 95% interval
 python3 -m evalkit calibrate suite.toml labels.jsonl  # judge vs your labels
@@ -94,7 +94,7 @@ model  = "claude-sonnet-5-5"   # the default; pick one that isn't the model unde
 effort = "low"
 ```
 
-`run` judges every stored run that has no verdict yet, through the same
+`run` judges each run as soon as it finishes, in the same worker, so judge calls overlap the runs still going; it then judges any stored run that still has no verdict, through the same
 isolated CLI and login as the runs themselves. Verdicts are cached under a hash
 of the criterion, the judge model and effort, and the exact trace, so `score`
 and `compare` never call the model, and a re-run trace is judged afresh. A run

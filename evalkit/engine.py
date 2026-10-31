@@ -55,39 +55,75 @@ def pending(jobs: Sequence[Job], store: JsonlStore, cli_version: str) -> list[Jo
 
 
 def execute(todo: Sequence[Job], runner: Runner, store: JsonlStore, cli_version: str,
-            workers: int, report: Callable[[str, Exception | None], None]) -> int:
+            workers: int, report: Callable[[str, Exception | None], None],
+            judging: tuple[Asker, JudgeConfig] | None = None) -> int:
     """Run *todo* and store each success. Failures are reported, not stored, so the
-    next ``run`` retries them. Only this thread writes the store. Returns failures."""
+    next ``run`` retries them. Only this thread writes the store. Returns failures.
+
+    With *judging*, each worker also judges its own trace as soon as the run ends,
+    so judge calls overlap the remaining runs instead of waiting for all of them.
+    """
+
+    def work(job: Job) -> tuple[Trace, list[tuple[judge.JudgeJob, Verdict | Exception]]]:
+        trace = runner.run(job.variant, job.case)
+        if judging is None:
+            return trace, []
+        asker, config = judging
+        return trace, [(item, _try_ask(asker, config, item))
+                       for item in judge.jobs_for(job, trace, config)]
+
     failures = 0
-    for job, result in _parallel(todo, lambda j: runner.run(j.variant, j.case), workers):
+    for job, result in _parallel(todo, work, workers):
         label = f"{job.variant.id} {job.case.id} #{job.sample}"
         if isinstance(result, Exception):
             failures += 1
             report(label, result)
             continue
-        store.put(Record(job.key, job.variant.id, job.case.id, job.sample, cli_version, result))
-        report(label, None)
+        trace, judged = result
+        store.put(Record(job.key, job.variant.id, job.case.id, job.sample, cli_version, trace))
+        errors = [v for _, v in judged if isinstance(v, Exception)]
+        for _, verdict in judged:
+            if isinstance(verdict, Verdict):
+                store.put_verdict(verdict)
+        failures += len(errors)
+        report(label, JudgeFailed(len(errors), errors[0]) if errors else None)
     return failures
+
+
+class JudgeFailed(RuntimeError):
+    """The run succeeded and was stored, but some of its judge calls failed."""
+
+    def __init__(self, count: int, first: Exception) -> None:
+        super().__init__(f"run stored, {count} judge call(s) failed: {first}")
 
 
 def execute_judging(todo: Sequence[judge.JudgeJob], asker: Asker, config: JudgeConfig,
                     store: JsonlStore, workers: int,
                     report: Callable[[str, Exception | None], None]) -> int:
     """Ask the judge for each missing verdict and cache it. Returns failures."""
-
-    def ask(item: judge.JudgeJob) -> tuple[bool, str]:
-        return judge.parse_verdict(asker.ask(config, judge.SYSTEM, judge.prompt(item.rubric, item.trace)))
-
     failures = 0
-    for item, result in _parallel(todo, ask, workers):
+    for item, result in _parallel(todo, lambda i: _ask(asker, config, i), workers):
         label = f"judge {item.label}: {item.rubric[:50]}"
         if isinstance(result, Exception):
             failures += 1
             report(label, result)
             continue
-        store.put_verdict(Verdict(item.key, result[0], result[1]))
+        store.put_verdict(result)
         report(label, None)
     return failures
+
+
+def _ask(asker: Asker, config: JudgeConfig, item: judge.JudgeJob) -> Verdict:
+    reply = asker.ask(config, judge.SYSTEM, judge.prompt(item.rubric, item.trace))
+    passed, reason = judge.parse_verdict(reply)
+    return Verdict(item.key, passed, reason)
+
+
+def _try_ask(asker: Asker, config: JudgeConfig, item: judge.JudgeJob) -> Verdict | Exception:
+    try:
+        return _ask(asker, config, item)
+    except Exception as exc:  # one bad verdict must not lose the run's trace
+        return exc
 
 
 def score(jobs: Sequence[Job], store: JsonlStore, config: JudgeConfig) -> Scored:

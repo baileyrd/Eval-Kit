@@ -24,6 +24,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from evalkit import checkout, render
 from evalkit.spec import Case, JudgeConfig, PromptSpec, Suite, Variant
@@ -33,6 +34,7 @@ CLAUDE = "claude"
 MAX_FILE_BYTES = 200_000  # larger outputs are recorded by name only
 _SKIP_IN_PROJECT = (".claude", ".git")
 _TMP_VARS = ("TMPDIR", "TMP", "TEMP", "CLAUDE_CODE_TMPDIR")
+_TOKEN_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
 class RunError(RuntimeError):
@@ -51,6 +53,7 @@ class Parsed:
     output_tokens: int
     cost_usd: float
     duration_ms: int
+    turns: int = 1  # more than one when a message arrived after the answer, e.g. a notice
 
 
 def cli_version() -> str:
@@ -109,37 +112,70 @@ def _model_args(model: str | None, effort: str | None) -> list[str]:
 
 
 def parse_stream(lines: Iterable[str]) -> Parsed:
-    """Read the init event, tool calls and the result event from stream-json."""
+    """Read the init event, tool calls and the result events from stream-json.
+
+    A message can arrive after the answer, such as a background-task notice, and start
+    another turn whose reply is not the answer. The answer is then the first turn's: its
+    result event when the CLI wrote one per turn, otherwise the last assistant text
+    before the first such message. Tokens and time add up over every turn.
+    """
     skills: tuple[str, ...] = ()
     calls: list[ToolCall] = []
-    result: Mapping[str, object] | None = None
-    for line in lines:
-        if not line.strip():
-            continue
-        event = json.loads(line)
+    results: list[Mapping[str, object]] = []
+    first_turn_text: str | None = None
+    injected = 0
+    for event in _events(lines):
         kind = event.get("type")
         if kind == "system" and event.get("subtype") == "init":
             skills = tuple(str(s) for s in event.get("skills", []))
         elif kind == "assistant":
+            content = event["message"]["content"]
             calls += [ToolCall(str(b["name"]), json.dumps(b.get("input", {}), sort_keys=True))
-                      for b in event["message"]["content"] if b.get("type") == "tool_use"]
+                      for b in content if b.get("type") == "tool_use"]
+            text = "".join(str(b.get("text", "")) for b in content if b.get("type") == "text")
+            if text.strip() and not injected:
+                first_turn_text = text
+        elif kind == "user" and _is_new_message(event) and first_turn_text is not None:
+            injected += 1
         elif kind == "result":
-            result = event
-    if result is None:
+            results.append(event)
+    if not results:
         raise RunError("the CLI ended without a result event")
-    usage = result.get("usage")
-    usage = usage if isinstance(usage, dict) else {}
+    answer = results[0]
+    final = str(answer.get("result") or "")
+    if len(results) == 1 and injected and first_turn_text is not None:
+        final = first_turn_text
+    usages = [u for u in (r.get("usage") for r in results) if isinstance(u, dict)]
     return Parsed(
         loaded_skills=skills,
         tool_calls=tuple(calls),
-        final_text=str(result.get("result") or ""),
-        is_error=bool(result.get("is_error")) or result.get("subtype") != "success",
-        input_tokens=sum(int(usage.get(k) or 0) for k in
-                         ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")),
-        output_tokens=int(usage.get("output_tokens") or 0),
-        cost_usd=float(str(result.get("total_cost_usd") or 0)),
-        duration_ms=int(str(result.get("duration_ms") or 0)),
+        final_text=final,
+        is_error=bool(answer.get("is_error")) or answer.get("subtype") != "success",
+        input_tokens=sum(int(u.get(k) or 0) for u in usages for k in _TOKEN_FIELDS),
+        output_tokens=sum(int(u.get("output_tokens") or 0) for u in usages),
+        cost_usd=max(float(str(r.get("total_cost_usd") or 0)) for r in results),
+        duration_ms=sum(int(str(r.get("duration_ms") or 0)) for r in results),
+        turns=max(len(results), 1 + injected),
     )
+
+
+def _events(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
+    for line in lines:
+        if line.strip():
+            event = json.loads(line)
+            if isinstance(event, dict):
+                yield event
+
+
+def _is_new_message(event: Mapping[str, Any]) -> bool:
+    """A user event that starts a turn, as opposed to one carrying tool results."""
+    message = event.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return True
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(b, dict) and b.get("type") != "tool_result" for b in content)
 
 
 def check_isolation(variant: Variant, loaded: Iterable[str], suite_skills: Iterable[str]) -> None:
@@ -184,6 +220,7 @@ class CliRunner:
                 output_tokens=parsed.output_tokens,
                 cost_usd=parsed.cost_usd,
                 duration_ms=parsed.duration_ms,
+                turns=parsed.turns,
             )
 
     def ask(self, judge: JudgeConfig, system: str, user_text: str) -> str:
@@ -246,6 +283,7 @@ def _sandbox() -> Iterator[tuple[Path, Path, dict[str, str]]]:
             path.mkdir()
         env = _auth_env(config)
         env.update({name: str(scratch) for name in _TMP_VARS})
+        env["CARGO_TARGET_DIR"] = str(scratch / "cargo-target")  # never a shared, stale build
         yield root, project, env
 
 

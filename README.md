@@ -155,8 +155,14 @@ sandboxed Bash only: Claude's Read, Grep and Glob tools can still read a sibling
 run's root unless the suite's settings fence them, for example with
 `permissions.blockReadsOutsideWorkingDirectories`. And concurrent suites only
 cover each other when they share a temp dir: a run started with another `TMPDIR`
-lives outside this run's deny. Keep `TMPDIR` short, because Claude Code falls back
+lives outside this run's deny. Each run's `CARGO_TARGET_DIR` is in its own `tmp/` too, so no
+run builds against another's stale target dir. Keep `TMPDIR` short, because Claude Code falls back
 to a temp dir under the system default when the path is long, and that dir is denied.
+
+A message can arrive after a run has answered, such as a background-task notice,
+and the run then replies to it. That reply is not the answer: the trace keeps the
+first turn's answer, adds tokens and time over every turn, and records `turns`.
+`score` counts such runs, and the keys manifest lists each run's turns.
 
 Runs use your Claude subscription login, never the API: `ANTHROPIC_API_KEY` is
 removed from each run's environment. The login comes from
@@ -174,7 +180,7 @@ next `run` retries them.
 
 `score --keys FILE` writes the manifest behind a score: one row per run of the
 current suite with its content key, variant, case, sample, the stored run's CLI
-version and trace hash, and its result (`pass`, `fail`, `unjudged` or `missing`).
+version, trace hash and turns, and its result (`pass`, `fail`, `unjudged` or `missing`).
 The header names the suite file by hash. Anyone with the suite can recompute the
 keys, and anyone with the store can find each run and check its hash, without
 calling a model. It holds no prompt, input or output, so it can be archived beside

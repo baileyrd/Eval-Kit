@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from typing import Any
 
 from evalkit import runner
 from evalkit.trace import Trace
@@ -38,7 +39,8 @@ class LateNoticeTest(unittest.TestCase):
         self.assertEqual(parsed.final_text, "REVIEW")
         self.assertEqual(parsed.turns, 2)
         self.assertEqual((parsed.input_tokens, parsed.output_tokens), (7, 7))
-        self.assertEqual((parsed.cost_usd, parsed.duration_ms), (0.75, 130))
+        # total_cost_usd is the session's running total, so the largest one is the run's.
+        self.assertEqual((parsed.cost_usd, parsed.duration_ms), (0.5, 130))
 
     def test_an_injected_message_before_the_only_result_keeps_the_first_turn(self) -> None:
         parsed = runner.parse_stream([
@@ -56,11 +58,14 @@ class LateNoticeTest(unittest.TestCase):
         self.assertEqual(parsed.turns, 1)
 
     def test_turns_round_trip_and_old_records_load_as_one(self) -> None:
+        def stored(t: Trace) -> Any:
+            return json.loads(json.dumps(t.to_json()))
+
         trace = Trace("x", (), (), (), 1, 1, 0.0, 1, turns=2)
-        self.assertEqual(Trace.from_json(trace.to_json()), trace)
-        old = trace.to_json()
-        del old["turns"]
-        self.assertEqual(Trace.from_json(old).turns, 1)
+        self.assertEqual(Trace.from_json(stored(trace)), trace)
+        one = Trace("x", (), (), (), 1, 1, 0.0, 1)
+        self.assertNotIn("turns", stored(one))  # a one-turn record, and its hash, are as before
+        self.assertEqual(Trace.from_json(stored(one)), one)
 
 
 if __name__ == "__main__":

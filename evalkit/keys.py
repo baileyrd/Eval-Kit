@@ -19,7 +19,7 @@ from evalkit.spec import Suite
 from evalkit.store import JsonlStore
 from evalkit.trace import Trace
 
-COLUMNS = ("# key", "variant", "case", "sample", "cli_version", "trace_sha256", "result")
+COLUMNS = ("# key", "variant", "case", "sample", "cli_version", "trace_sha256", "turns", "result")
 _NONE = "-"
 
 
@@ -48,7 +48,7 @@ def _row(job: Job, store: JsonlStore, scored: dict[tuple[str, str, int], bool]) 
     head = [job.key, job.variant.id, job.case.id, str(job.sample)]
     record = store.get(job.key)
     if record is None:
-        return [*head, _NONE, _NONE, "missing"]
+        return [*head, _NONE, _NONE, _NONE, "missing"]
     passed = scored.get((job.variant.id, job.case.id, job.sample))
     result = "unjudged" if passed is None else ("pass" if passed else "fail")
-    return [*head, record.cli_version, trace_sha256(record.trace), result]
+    return [*head, record.cli_version, trace_sha256(record.trace), str(record.trace.turns), result]

@@ -234,6 +234,10 @@ def _score(args: argparse.Namespace) -> int:
     for row in stats.summarise(outcomes):
         trigger = "-" if row.trigger_rate is None else f"{row.trigger_rate:.0%}"
         print(f"{row.variant:<20} {row.runs:>4}/{expected:<4} {row.pass_rate:>6.0%} {trigger:>10}")
+    late = sum(1 for job in jobs if (r := store.get(job.key)) is not None and r.trace.turns > 1)
+    if late:
+        print(f"{late} run(s) had a turn after the answer, such as a reply to a notice; "
+              "each is scored on its first turn's answer")
     if scored.unjudged:
         print(f"{scored.unjudged} stored run(s) await a judge verdict; 'evalkit run' judges them")
     if args.by_check:

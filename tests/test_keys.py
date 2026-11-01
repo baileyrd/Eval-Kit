@@ -66,6 +66,12 @@ class KeysManifestTest(TempDirTest):
         self.assertEqual(second, [self.jobs[1].key, "control", "one", "1", "-", "-", "-", "missing"])
         self.assertNotIn("stale-key", text)  # only the current configuration's keys
 
+    def test_score_flags_runs_that_answered_a_later_message(self) -> None:
+        late = Trace("OK", (), (), (), 1, 1, 0.0, 1, turns=2)
+        self.store.put(Record(self.jobs[1].key, "control", "one", 1, "2.1.316", late))
+        _, stdout, _ = run_cli("score", str(self.suite_path))
+        self.assertIn("1 run(s) had a turn after the answer", stdout)
+
     def test_a_stored_run_without_a_verdict_is_unjudged(self) -> None:
         self.write("s.toml", SUITE.replace('{ regex = "OK" }', '{ judge = "says hello" }'))
         self.suite = load_suite(self.suite_path)

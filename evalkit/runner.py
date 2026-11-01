@@ -5,6 +5,12 @@ CLAUDE.md, plugins or settings leak in. The login comes from
 ``CLAUDE_CODE_OAUTH_TOKEN`` (``claude setup-token``) or, failing that, a copy of
 the current ``.credentials.json``. ``ANTHROPIC_API_KEY`` is removed from the
 child's environment, so a run never bills the API.
+
+Runs can share a host, so each one's scratch is private: ``TMPDIR`` (and
+``CLAUDE_CODE_TMPDIR``, where the sandbox puts Bash's ``$TMPDIR``) point into the
+run's own temp root, and ``--settings`` denies sandboxed commands the shared temp
+root while re-opening only that run's own. Claude's file tools (Read, Grep, Glob)
+are not bound by the sandbox; a suite fences them with its own ``settings``.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from evalkit.trace import ToolCall, Trace
 CLAUDE = "claude"
 MAX_FILE_BYTES = 200_000  # larger outputs are recorded by name only
 _SKIP_IN_PROJECT = (".claude", ".git")
+_TMP_VARS = ("TMPDIR", "TMP", "TEMP", "CLAUDE_CODE_TMPDIR")
 
 
 class RunError(RuntimeError):
@@ -59,9 +66,17 @@ _BASE_ARGV = (CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
               "--setting-sources", "project", "--strict-mcp-config", "--no-session-persistence")
 
 
-def command(variant: Variant, system_file: Path | None, allowed_tools: Iterable[str]) -> list[str]:
-    """The argv for one run; the user turn goes on stdin. Pure, for testing."""
+def command(variant: Variant, system_file: Path | None, allowed_tools: Iterable[str],
+            isolation: Path | None = None) -> list[str]:
+    """The argv for one run; the user turn goes on stdin. Pure, for testing.
+
+    *isolation* is a settings file passed with ``--settings``: command-line settings
+    merge over the project's, and their ``allowRead`` counts even where the project's
+    would not.
+    """
     argv = [*_BASE_ARGV, *_model_args(variant.model, variant.effort)]
+    if isolation is not None:
+        argv += ["--settings", str(isolation)]
     tools = list(allowed_tools)
     if isinstance(variant.subject, PromptSpec):
         assert system_file is not None
@@ -77,6 +92,16 @@ def judge_command(judge: JudgeConfig, system_file: Path) -> list[str]:
     """The argv for one judge call: a plain prompt with no tools."""
     return [*_BASE_ARGV, *_model_args(judge.model, judge.effort),
             "--system-prompt-file", str(system_file), "--tools", ""]
+
+
+def isolation_settings(root: Path, shared: Iterable[Path]) -> dict[str, object]:
+    """Sandbox settings that deny the *shared* temp roots and re-open only *root*.
+
+    The narrower path wins where read rules overlap, so the run keeps its own root
+    while every sibling run's project and scratch under the shared roots is unreadable.
+    """
+    return {"sandbox": {"filesystem": {"denyRead": [str(p) for p in shared],
+                                       "allowRead": [str(root)]}}}
 
 
 def _model_args(model: str | None, effort: str | None) -> list[str]:
@@ -142,7 +167,10 @@ class CliRunner:
             for name, text in case.files:
                 _write_inside(project, name, text)
             system_file = self._prepare_subject(variant, root, project)
-            argv = command(variant, system_file, self.suite.allowed_tools)
+            isolation = root / "isolation.settings.json"
+            isolation.write_text(json.dumps(isolation_settings(root, _shared_temp_roots())),
+                                 encoding="utf-8")
+            argv = command(variant, system_file, self.suite.allowed_tools, isolation)
             parsed = self._invoke(argv, render.user_turn(variant, case), project, env)
             check_isolation(variant, parsed.loaded_skills, self.suite_skills)
             if parsed.is_error:
@@ -209,13 +237,25 @@ class CliRunner:
 
 @contextmanager
 def _sandbox() -> Iterator[tuple[Path, Path, dict[str, str]]]:
-    """A temp root holding an empty project and a private config dir with the login."""
+    """A temp root holding an empty project, a private config dir with the login, and
+    the run's own scratch dir, which every temp variable in the environment names."""
     with tempfile.TemporaryDirectory(prefix="evalkit-") as tmp:
-        root = Path(tmp)
-        project, config = root / "project", root / "config"
-        project.mkdir()
-        config.mkdir()
-        yield root, project, _auth_env(config)
+        root = Path(tmp).resolve()
+        project, config, scratch = root / "project", root / "config", root / "tmp"
+        for path in (project, config, scratch):
+            path.mkdir()
+        env = _auth_env(config)
+        env.update({name: str(scratch) for name in _TMP_VARS})
+        yield root, project, env
+
+
+def _shared_temp_roots() -> tuple[Path, ...]:
+    """Where other runs' roots and scratch can live: this host's temp dir, and /tmp."""
+    roots = [Path(tempfile.gettempdir()).resolve()]
+    system = Path("/tmp")
+    if system.is_dir() and system.resolve() not in roots:
+        roots.append(system.resolve())
+    return tuple(roots)
 
 
 def _auth_env(config: Path) -> dict[str, str]:

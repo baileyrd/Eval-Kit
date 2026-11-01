@@ -21,6 +21,7 @@ python3 -m evalkit init path/to/skill                 # writes evals/suite.toml
 
 python3 -m evalkit run     suite.toml [--jobs 4]      # runs only what isn't stored yet; 4 at a time by default
 python3 -m evalkit score   suite.toml [--verbose]     # pass and trigger rates; no model calls
+python3 -m evalkit score   suite.toml --keys reports/x/keys.txt   # also archive the keys behind it
 python3 -m evalkit compare suite.toml control skill   # paired lift with a 95% interval
 python3 -m evalkit calibrate suite.toml labels.jsonl  # judge vs your labels
 python3 -m evalkit ablate  suite.toml skill           # what each section and file is worth
@@ -144,6 +145,19 @@ settings or MCP servers leak in. A skill under test is copied into the project's
 checks the loaded-skills list and fails if the control saw the skill under test,
 or the skill variant didn't load it.
 
+Runs sharing a host can't see each other's scratch. Each run has its own temp
+root holding its project, config and a `tmp/` that `TMPDIR`, `TMP`, `TEMP` and
+`CLAUDE_CODE_TMPDIR` all point to, so the sandbox gives Bash a per-run `$TMPDIR`
+too. Each run also gets `--settings` that deny sandboxed commands the host's temp
+dir and `/tmp`, and re-open only the run's own root. Command-line settings merge
+over the suite's, so a suite can't lift the deny. Two limits remain. The deny binds
+sandboxed Bash only: Claude's Read, Grep and Glob tools can still read a sibling
+run's root unless the suite's settings fence them, for example with
+`permissions.blockReadsOutsideWorkingDirectories`. And concurrent suites only
+cover each other when they share a temp dir: a run started with another `TMPDIR`
+lives outside this run's deny. Keep `TMPDIR` short, because Claude Code falls back
+to a temp dir under the system default when the path is long, and that dir is denied.
+
 Runs use your Claude subscription login, never the API: `ANTHROPIC_API_KEY` is
 removed from each run's environment. The login comes from
 `CLAUDE_CODE_OAUTH_TOKEN` if set (create one with `claude setup-token`; needed
@@ -156,7 +170,17 @@ the skill's files or the rendered prompt, model, effort, allowed tools, the
 case's input and fixtures, and the sample number. Change a skill and only its
 runs repeat; change a check and `score` re-judges without calling the model. A
 new Claude CLI version re-runs everything. Failed runs aren't stored, so the
-next `run` retries them. Each finding names the rule, the
+next `run` retries them.
+
+`score --keys FILE` writes the manifest behind a score: one row per run of the
+current suite with its content key, variant, case, sample, the stored run's CLI
+version and trace hash, and its result (`pass`, `fail`, `unjudged` or `missing`).
+The header names the suite file by hash. Anyone with the suite can recompute the
+keys, and anyone with the store can find each run and check its hash, without
+calling a model. It holds no prompt, input or output, so it can be archived beside
+a report. It never replaces an existing file.
+
+Each finding names the rule, the
 file, and the Anthropic page the rule comes from.
 
 ## Subjects

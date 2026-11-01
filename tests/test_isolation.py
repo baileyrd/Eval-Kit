@@ -54,7 +54,8 @@ class RunIsolationTest(TempDirTest):
         self.fake = FakeClaude()
         patches = [mock.patch.object(tempfile, "tempdir", str(self.shared)),
                    mock.patch.dict("os.environ", {"CLAUDE_CODE_OAUTH_TOKEN": "t",
-                                                  "TMPDIR": str(self.shared)}),
+                                                  "TMPDIR": str(self.shared),
+                                                  "CARGO_TARGET_DIR": str(self.shared / "t")}),
                    mock.patch("evalkit.runner.subprocess.run", self.fake)]
         for patch in patches:
             patch.start()
@@ -77,6 +78,7 @@ class RunIsolationTest(TempDirTest):
             self.assertNotEqual(tmp, self.shared)
             for name in ("TMP", "TEMP", "CLAUDE_CODE_TMPDIR"):
                 self.assertEqual(call["env"][name], str(tmp), name)
+            self.assertTrue(Path(call["env"]["CARGO_TARGET_DIR"]).is_relative_to(tmp))
         self.assertNotEqual(first["env"]["TMPDIR"], second["env"]["TMPDIR"])
 
     def test_sandbox_denies_the_shared_root_and_reopens_only_its_own(self) -> None:

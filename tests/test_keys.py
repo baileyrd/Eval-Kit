@@ -56,14 +56,14 @@ class KeysManifestTest(TempDirTest):
         digest = hashlib.sha256(self.suite_path.read_bytes()).hexdigest()
         self.assertEqual(header, f"# evalkit keys s.toml sha256={digest}")
         self.assertEqual(columns.split("\t"), ["# key", "variant", "case", "sample", "cli_version",
-                                               "trace_sha256", "result"])
+                                               "trace_sha256", "turns", "result"])
         first, second = (row.split("\t") for row in rows)
         trace_sha = hashlib.sha256(json.dumps(trace("OK").to_json(), sort_keys=True,
                                               ensure_ascii=False).encode()).hexdigest()
         self.assertEqual(keys.trace_sha256(trace("OK")), trace_sha)
         self.assertEqual(first, [self.jobs[0].key, "control", "one", "0", "2.1.316", trace_sha,
-                                 "pass"])
-        self.assertEqual(second, [self.jobs[1].key, "control", "one", "1", "-", "-", "missing"])
+                                 "1", "pass"])
+        self.assertEqual(second, [self.jobs[1].key, "control", "one", "1", "-", "-", "-", "missing"])
         self.assertNotIn("stale-key", text)  # only the current configuration's keys
 
     def test_a_stored_run_without_a_verdict_is_unjudged(self) -> None:

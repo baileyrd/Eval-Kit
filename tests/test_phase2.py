@@ -248,6 +248,18 @@ class EngineAndStatsTest(TempDirTest):
         self.assertGreaterEqual(high, 0.25)
         self.assertEqual(stats.bootstrap([0.0, 1.0]), stats.bootstrap([0.0, 1.0]))  # seeded
 
+    def test_flip_needs_a_move_of_more_than_half(self) -> None:
+        def runs(variant: str, case: str, passes: list[bool]) -> list[engine.Outcome]:
+            return [engine.Outcome(variant, case, i, p, (), None) for i, p in enumerate(passes)]
+
+        outcomes = (runs("a", "half", [True, False]) + runs("b", "half", [False, False])
+                    + runs("a", "full", [True, True]) + runs("b", "full", [False, False])
+                    + runs("a", "up", [False, False, False, False])
+                    + runs("b", "up", [True, True, True, False]))
+        result = stats.compare(outcomes, "a", "b")
+        self.assertEqual(result.regressed, ("full",))  # 0.5 -> 0 is noise at 2 samples
+        self.assertEqual(result.improved, ("up",))  # 0 -> 0.75
+
     def test_compare_needs_shared_cases(self) -> None:
         with self.assertRaisesRegex(ValueError, "no case in common"):
             stats.compare([engine.Outcome("a", "x", 0, True, (), None)], "a", "b")

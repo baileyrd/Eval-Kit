@@ -206,7 +206,9 @@ A check passes when its value is 1.0. `weight`, `not` and `json_schema` are defe
 - **Per-case rate:** the mean pass rate across samples.
 - **Lift:** the mean of the per-case differences (head minus base) over cases both variants share.
 - **Interval:** a 95% percentile bootstrap that resamples cases, 2,000 draws, fixed seed.
-- **Flipped case:** a case whose majority verdict differs between the two variants.
+- **Flipped case:** a case whose pass rate moved by more than 0.5 between the two variants.
+  A majority-verdict rule flagged a case that passes half the time 19% of the time at 2
+  samples (and 21% at 4); this rule flags it 6% of the time.
 - **Trigger rate** (skills): the share of runs where the skill was invoked. Lift is
   reported twice, over all runs and over triggered runs only (M3).
 - **Gate:** fails only when the upper bound of the lift interval is below `-max_drop`.

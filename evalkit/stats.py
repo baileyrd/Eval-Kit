@@ -3,7 +3,8 @@
 - Per-case rate: the share of a case's samples that passed.
 - Lift: the mean over shared cases of (head rate - base rate).
 - Interval: a 95% percentile bootstrap that resamples cases, with a fixed seed.
-- Flipped case: one whose majority verdict differs between the two variants.
+- Flipped case: one whose pass rate moved by more than FLIP between the two variants.
+  At 2 samples only 0/2 <-> 2/2 counts, so a coin-flip case seldom trips it.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from evalkit.engine import Outcome
 DRAWS = 2000
 SEED = 0
 CONFIDENCE = 0.95
+FLIP = 0.5  # a case flips only when its rate moves by more than this
 
 
 @dataclass(frozen=True)
@@ -36,8 +38,8 @@ class Comparison:
     lift: float
     low: float
     high: float
-    improved: tuple[str, ...]  # cases flipped from fail to pass
-    regressed: tuple[str, ...]  # cases flipped from pass to fail
+    improved: tuple[str, ...]  # cases whose rate rose by more than FLIP
+    regressed: tuple[str, ...]  # cases whose rate fell by more than FLIP
     lift_when_triggered: float | None  # head limited to runs where its skill loaded
 
 
@@ -90,8 +92,8 @@ def compare(outcomes: Sequence[Outcome], base: str, head: str) -> Comparison:
     has_skill = any(o.triggered is not None for o in outcomes if o.variant == head)
     return Comparison(
         base, head, len(shared), _mean(diffs), low, high,
-        improved=tuple(c for c in shared if base_rates[c] < 0.5 <= head_rates[c]),
-        regressed=tuple(c for c in shared if head_rates[c] < 0.5 <= base_rates[c]),
+        improved=tuple(c for c, d in zip(shared, diffs) if d > FLIP),
+        regressed=tuple(c for c, d in zip(shared, diffs) if d < -FLIP),
         lift_when_triggered=_mean(when_triggered) if has_skill and when_triggered else None,
     )
 

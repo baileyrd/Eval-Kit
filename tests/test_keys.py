@@ -54,16 +54,16 @@ class KeysManifestTest(TempDirTest):
         text = self.manifest()
         header, columns, *rows = text.splitlines()
         digest = hashlib.sha256(self.suite_path.read_bytes()).hexdigest()
-        self.assertEqual(header, f"# evalkit keys s.toml sha256={digest}")
+        self.assertEqual(header, f"# evalkit keys s.toml sha256={digest} isolated=false")
         self.assertEqual(columns.split("\t"), ["# key", "variant", "case", "sample", "cli_version",
-                                               "trace_sha256", "turns", "result"])
+                                               "trace_sha256", "turns", "policy", "result"])
         first, second = (row.split("\t") for row in rows)
         trace_sha = hashlib.sha256(json.dumps(trace("OK").to_json(), sort_keys=True,
                                               ensure_ascii=False).encode()).hexdigest()
         self.assertEqual(keys.trace_sha256(trace("OK")), trace_sha)
         self.assertEqual(first, [self.jobs[0].key, "control", "one", "0", "2.1.316", trace_sha,
-                                 "1", "pass"])
-        self.assertEqual(second, [self.jobs[1].key, "control", "one", "1", "-", "-", "-", "missing"])
+                                 "1", "1", "pass"])
+        self.assertEqual(second, [self.jobs[1].key, "control", "one", "1", "-", "-", "-", "-", "missing"])
         self.assertNotIn("stale-key", text)  # only the current configuration's keys
 
     def test_score_flags_runs_that_answered_a_later_message(self) -> None:
@@ -71,6 +71,12 @@ class KeysManifestTest(TempDirTest):
         self.store.put(Record(self.jobs[1].key, "control", "one", 1, "2.1.316", late))
         _, stdout, _ = run_cli("score", str(self.suite_path))
         self.assertIn("1 run(s) had a turn after the answer", stdout)
+
+    def test_score_flags_runs_from_an_older_isolation_policy(self) -> None:
+        self.store.put(Record(self.jobs[1].key, "control", "one", 1, "2.1.316", trace("OK"),
+                              policy=0))
+        _, stdout, _ = run_cli("score", str(self.suite_path))
+        self.assertIn("1 run(s) were made under an older isolation policy", stdout)
 
     def test_a_stored_run_without_a_verdict_is_unjudged(self) -> None:
         self.write("s.toml", SUITE.replace('{ regex = "OK" }', '{ judge = "says hello" }'))

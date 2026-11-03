@@ -72,6 +72,12 @@ class KeysManifestTest(TempDirTest):
         _, stdout, _ = run_cli("score", str(self.suite_path))
         self.assertIn("1 run(s) had a turn after the answer", stdout)
 
+    def test_score_flags_runs_from_an_older_isolation_policy(self) -> None:
+        self.store.put(Record(self.jobs[1].key, "control", "one", 1, "2.1.316", trace("OK"),
+                              policy=0))
+        _, stdout, _ = run_cli("score", str(self.suite_path))
+        self.assertIn("1 run(s) were made under an older isolation policy", stdout)
+
     def test_a_stored_run_without_a_verdict_is_unjudged(self) -> None:
         self.write("s.toml", SUITE.replace('{ regex = "OK" }', '{ judge = "says hello" }'))
         self.suite = load_suite(self.suite_path)

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from evalkit import checkout, render
-from evalkit.spec import Case, JudgeConfig, PromptSpec, Suite, Variant
+from evalkit.spec import Case, Isolated, JudgeConfig, PromptSpec, Suite, Variant
 from evalkit.trace import ToolCall, Trace
 
 CLAUDE = "claude"
@@ -53,7 +53,7 @@ class Parsed:
     output_tokens: int
     cost_usd: float
     duration_ms: int
-    turns: int = 1  # more than one when a message arrived after the answer, e.g. a notice
+    turns: int = 1  # result events; more than one when a message came after the answer
 
 
 def cli_version() -> str:
@@ -97,14 +97,23 @@ def judge_command(judge: JudgeConfig, system_file: Path) -> list[str]:
             "--system-prompt-file", str(system_file), "--tools", ""]
 
 
-def isolation_settings(root: Path, shared: Iterable[Path]) -> dict[str, object]:
+def isolation_settings(root: Path, shared: Iterable[Path],
+                       fence: Isolated | None = None) -> dict[str, object]:
     """Sandbox settings that deny the *shared* temp roots and re-open only *root*.
 
     The narrower path wins where read rules overlap, so the run keeps its own root
     while every sibling run's project and scratch under the shared roots is unreadable.
+    That binds sandboxed Bash only. With *fence*, the file tools refuse reads outside
+    the working directory too, Bash must run in the sandbox, and the fence's
+    ``readable`` paths are re-opened to it.
     """
-    return {"sandbox": {"filesystem": {"denyRead": [str(p) for p in shared],
-                                       "allowRead": [str(root)]}}}
+    filesystem = {"denyRead": [str(p) for p in shared], "allowRead": [str(root)]}
+    if fence is None:
+        return {"sandbox": {"filesystem": filesystem}}
+    filesystem["allowRead"] += list(fence.readable)
+    return {"permissions": {"blockReadsOutsideWorkingDirectories": True},
+            "sandbox": {"enabled": True, "failIfUnavailable": True,
+                        "allowUnsandboxedCommands": False, "filesystem": filesystem}}
 
 
 def _model_args(model: str | None, effort: str | None) -> list[str]:
@@ -114,48 +123,38 @@ def _model_args(model: str | None, effort: str | None) -> list[str]:
 def parse_stream(lines: Iterable[str]) -> Parsed:
     """Read the init event, tool calls and the result events from stream-json.
 
-    A message can arrive after the answer, such as a background-task notice, and start
-    another turn whose reply is not the answer. The answer is then the first turn's: its
-    result event when the CLI wrote one per turn, otherwise the last assistant text
-    before the first such message. Tokens and time add up over every turn.
+    The CLI writes one result event per turn. A message that arrives after the
+    answer, such as a background-task notice, starts another turn whose reply is not
+    the answer, so the answer is the first result's. Messages that arrive while the
+    first turn is still working stay in it. Tokens and time add up over every turn;
+    ``total_cost_usd`` is a running total, so the largest is the run's.
     """
     skills: tuple[str, ...] = ()
     calls: list[ToolCall] = []
     results: list[Mapping[str, object]] = []
-    first_turn_text: str | None = None
-    injected = 0
     for event in _events(lines):
         kind = event.get("type")
         if kind == "system" and event.get("subtype") == "init":
             skills = tuple(str(s) for s in event.get("skills", []))
         elif kind == "assistant":
-            content = event["message"]["content"]
             calls += [ToolCall(str(b["name"]), json.dumps(b.get("input", {}), sort_keys=True))
-                      for b in content if b.get("type") == "tool_use"]
-            text = "".join(str(b.get("text", "")) for b in content if b.get("type") == "text")
-            if text.strip() and not injected:
-                first_turn_text = text
-        elif kind == "user" and _is_new_message(event) and first_turn_text is not None:
-            injected += 1
+                      for b in event["message"]["content"] if b.get("type") == "tool_use"]
         elif kind == "result":
             results.append(event)
     if not results:
         raise RunError("the CLI ended without a result event")
     answer = results[0]
-    final = str(answer.get("result") or "")
-    if len(results) == 1 and injected and first_turn_text is not None:
-        final = first_turn_text
     usages = [u for u in (r.get("usage") for r in results) if isinstance(u, dict)]
     return Parsed(
         loaded_skills=skills,
         tool_calls=tuple(calls),
-        final_text=final,
+        final_text=str(answer.get("result") or ""),
         is_error=bool(answer.get("is_error")) or answer.get("subtype") != "success",
         input_tokens=sum(int(u.get(k) or 0) for u in usages for k in _TOKEN_FIELDS),
         output_tokens=sum(int(u.get("output_tokens") or 0) for u in usages),
         cost_usd=max(float(str(r.get("total_cost_usd") or 0)) for r in results),
         duration_ms=sum(int(str(r.get("duration_ms") or 0)) for r in results),
-        turns=max(len(results), 1 + injected),
+        turns=len(results),
     )
 
 
@@ -165,17 +164,6 @@ def _events(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
             event = json.loads(line)
             if isinstance(event, dict):
                 yield event
-
-
-def _is_new_message(event: Mapping[str, Any]) -> bool:
-    """A user event that starts a turn, as opposed to one carrying tool results."""
-    message = event.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if isinstance(content, str):
-        return True
-    if not isinstance(content, list):
-        return False
-    return any(isinstance(b, dict) and b.get("type") != "tool_result" for b in content)
 
 
 def check_isolation(variant: Variant, loaded: Iterable[str], suite_skills: Iterable[str]) -> None:
@@ -204,7 +192,8 @@ class CliRunner:
                 _write_inside(project, name, text)
             system_file = self._prepare_subject(variant, root, project)
             isolation = root / "isolation.settings.json"
-            isolation.write_text(json.dumps(isolation_settings(root, _shared_temp_roots())),
+            isolation.write_text(json.dumps(isolation_settings(root, _shared_temp_roots(),
+                                                              self.suite.isolated)),
                                  encoding="utf-8")
             argv = command(variant, system_file, self.suite.allowed_tools, isolation)
             parsed = self._invoke(argv, render.user_turn(variant, case), project, env)

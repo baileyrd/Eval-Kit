@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from evalkit.plan import ISOLATION_POLICY
 from evalkit.trace import Trace
 
 
@@ -21,6 +22,7 @@ class Record:
     sample: int
     cli_version: str
     trace: Trace
+    policy: int = ISOLATION_POLICY  # the isolation the run was made under; see plan
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,7 @@ class JsonlStore:
     def put(self, record: Record) -> None:
         self._append({"key": record.key, "variant": record.variant, "case": record.case,
                       "sample": record.sample, "cli_version": record.cli_version,
-                      "trace": record.trace.to_json()})
+                      "policy": record.policy, "trace": record.trace.to_json()})
         self._records[record.key] = record
 
     def put_verdict(self, verdict: Verdict) -> None:
@@ -81,4 +83,4 @@ class JsonlStore:
             raise TypeError("trace must be an object")
         self._records[key] = Record(key, str(data["variant"]), str(data["case"]),
                                     int(str(data["sample"])), str(data["cli_version"]),
-                                    Trace.from_json(trace))
+                                    Trace.from_json(trace), int(str(data.get("policy", 0))))

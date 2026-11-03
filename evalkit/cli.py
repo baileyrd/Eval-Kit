@@ -10,7 +10,8 @@ from contextlib import ExitStack
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from evalkit import ablate, engine, gitrev, judge, lint, plan, render, rules, scaffold, stats
+from evalkit import (ablate, engine, gitrev, judge, keys, lint, plan, render, rules, scaffold,
+                     stats)
 from evalkit.runner import CliRunner, RunError, cli_version
 from evalkit.spec import (SKILL_FILE, SUITE_FILE, Case, SkillSpec, SpecError, Suite, Variant,
                           load_cases,
@@ -57,6 +58,9 @@ def _parser() -> argparse.ArgumentParser:
     score_cmd.add_argument("--verbose", action="store_true", help="list each failed run")
     score_cmd.add_argument("--by-check", action="store_true",
                            help="each check's pass rate per variant and case")
+    score_cmd.add_argument("--keys", type=Path, metavar="FILE",
+                           help="also write the content key and stored run behind each job "
+                                "to FILE, for archiving beside the report; never replaces one")
     score_cmd.set_defaults(handler=_score)
 
     compare_cmd = commands.add_parser("compare", help="paired lift of HEAD over BASE")
@@ -220,11 +224,20 @@ def _score(args: argparse.Namespace) -> int:
         return _fail(exc)
     scored = engine.score(jobs, store, suite.judge)
     outcomes = scored.outcomes
+    if args.keys is not None:
+        try:
+            _write_new(args.keys, keys.manifest(suite, jobs, store, outcomes))
+        except OSError as exc:
+            return _fail(exc)
     expected = len(suite.cases) * suite.samples
     print(f"{'variant':<20} {'runs':>9} {'pass':>6} {'triggered':>10}")
     for row in stats.summarise(outcomes):
         trigger = "-" if row.trigger_rate is None else f"{row.trigger_rate:.0%}"
         print(f"{row.variant:<20} {row.runs:>4}/{expected:<4} {row.pass_rate:>6.0%} {trigger:>10}")
+    late = sum(1 for job in jobs if (r := store.get(job.key)) is not None and r.trace.turns > 1)
+    if late:
+        print(f"{late} run(s) had a turn after the answer, such as a reply to a notice; "
+              "each is scored on its first turn's answer")
     if scored.unjudged:
         print(f"{scored.unjudged} stored run(s) await a judge verdict; 'evalkit run' judges them")
     if args.by_check:
@@ -235,7 +248,19 @@ def _score(args: argparse.Namespace) -> int:
         for o in outcomes:
             if not o.passed:
                 print(f"  {o.variant} {o.case} #{o.sample}: failed {'; '.join(o.failed_checks)}")
+    if args.keys is not None:
+        print(f"keys of {len(jobs)} runs written to {args.keys}")
     return 0
+
+
+def _write_new(path: Path, text: str) -> None:
+    """Write *text* to a new file; an archived manifest is never overwritten."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(text)
+    except FileExistsError:
+        raise FileExistsError(f"{path} already exists; write a new score's keys elsewhere") from None
 
 
 def _compare(args: argparse.Namespace) -> int:

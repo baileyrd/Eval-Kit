@@ -22,6 +22,7 @@ class Trace:
     output_tokens: int
     cost_usd: float
     duration_ms: int
+    turns: int = 1  # more than one when a message, such as a notice, came after the answer
 
     def file_text(self, path: str) -> str | None:
         return dict(self.files).get(path)
@@ -30,7 +31,10 @@ class Trace:
         return any(name == path for name, _ in self.files)
 
     def to_json(self) -> dict[str, object]:
-        return asdict(self)
+        data = asdict(self)
+        if self.turns == 1:  # leave one-turn records, and their hashes, as they always were
+            del data["turns"]
+        return data
 
     @classmethod
     def from_json(cls, data: dict[str, object]) -> Trace:
@@ -46,6 +50,7 @@ class Trace:
             output_tokens=_int(data["output_tokens"]),
             cost_usd=float(str(data["cost_usd"])),
             duration_ms=_int(data["duration_ms"]),
+            turns=_int(data.get("turns", 1)),  # absent in records made before it existed
         )
 
 

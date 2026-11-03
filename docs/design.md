@@ -157,6 +157,7 @@ subscription login. Each run gets its own environment instead:
 - `CLAUDE_CONFIG_DIR` set to a fresh temp dir, so no user skills, `CLAUDE.md`, plugins or settings leak in.
 - `CLAUDE_CODE_OAUTH_TOKEN` taken from `claude setup-token`, run once by the owner, so the subscription login carries over.
 - `--setting-sources project --strict-mcp-config --no-session-persistence`.
+- A private scratch dir: `TMPDIR`, `TMP`, `TEMP` and `CLAUDE_CODE_TMPDIR` point into the run's own temp root, and `--settings` denies sandboxed commands the shared temp roots while re-opening that root, so concurrent runs can't read each other's projects or scratch through Bash.
 
 **Invocation.**
 ```

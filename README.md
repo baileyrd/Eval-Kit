@@ -145,24 +145,46 @@ settings or MCP servers leak in. A skill under test is copied into the project's
 checks the loaded-skills list and fails if the control saw the skill under test,
 or the skill variant didn't load it.
 
-Runs sharing a host can't see each other's scratch. Each run has its own temp
-root holding its project, config and a `tmp/` that `TMPDIR`, `TMP`, `TEMP` and
-`CLAUDE_CODE_TMPDIR` all point to, so the sandbox gives Bash a per-run `$TMPDIR`
-too. Each run also gets `--settings` that deny sandboxed commands the host's temp
-dir and `/tmp`, and re-open only the run's own root. Command-line settings merge
-over the suite's, so a suite can't lift the deny. Two limits remain. The deny binds
-sandboxed Bash only: Claude's Read, Grep and Glob tools can still read a sibling
-run's root unless the suite's settings fence them, for example with
-`permissions.blockReadsOutsideWorkingDirectories`. And concurrent suites only
-cover each other when they share a temp dir: a run started with another `TMPDIR`
-lives outside this run's deny. Each run's `CARGO_TARGET_DIR` is in its own `tmp/` too, so no
-run builds against another's stale target dir. Keep `TMPDIR` short, because Claude Code falls back
-to a temp dir under the system default when the path is long, and that dir is denied.
+Each run's scratch is its own. Its temp root holds its project, config and a
+`tmp/` that `TMPDIR`, `TMP`, `TEMP` and `CLAUDE_CODE_TMPDIR` all point to, so the
+sandbox gives Bash a per-run `$TMPDIR` too, and `CARGO_TARGET_DIR` is in that
+`tmp/`, so no run builds against another's stale target dir. Each run also gets
+`--settings` that deny sandboxed commands the host's temp dir and `/tmp` and
+re-open only the run's own root. Command-line settings merge over the suite's, so
+a suite can't lift the deny.
 
-A message can arrive after a run has answered, such as a background-task notice,
-and the run then replies to it. That reply is not the answer: the trace keeps the
-first turn's answer, adds tokens and time over every turn, and records `turns`.
-`score` counts such runs, and the keys manifest lists each run's turns.
+That deny binds sandboxed Bash only. Claude's Read, Grep and Glob tools can still
+read a sibling run's root, and Bash can run unsandboxed if the suite allows it.
+For a run that must be blind to other runs, set `isolated = true`:
+
+```toml
+isolated = true
+readable = ["~/.cargo", "~/.rustup"]   # re-opened to sandboxed Bash; optional
+```
+
+The file tools then refuse reads outside the run's working directory
+(`permissions.blockReadsOutsideWorkingDirectories`), and Bash runs in the
+sandbox or not at all (`failIfUnavailable`, no unsandboxed commands). The block
+also hides your home directory and the other user-file roots from sandboxed
+Bash, so list in `readable` what its tools need, such as cargo's caches. Both
+keys are part of each run's key, and the keys manifest says whether a suite was
+isolated.
+
+Two limits remain. Concurrent suites only cover each other when they share a
+temp dir: a run started with another `TMPDIR` lives outside this run's deny. And
+keep `TMPDIR` short, because Claude Code falls back to a temp dir under the
+system default when the path is long, and that dir is denied.
+
+Each record carries the isolation policy it ran under (`plan.ISOLATION_POLICY`).
+Records made before private scratch load as policy 0; `run` re-runs them rather
+than reuse them, and `score` counts any it still sees.
+
+The CLI ends each turn with a result event. A message can arrive after the
+answer, such as a background-task notice, and the run then replies in a turn of
+its own. That reply is not the answer: the trace keeps the first result's text,
+adds tokens and time over every turn, and records `turns`. A message that arrives
+while the first turn is still working stays in it. `score` counts runs with more
+than one turn, and the keys manifest lists each run's turns.
 
 Runs use your Claude subscription login, never the API: `ANTHROPIC_API_KEY` is
 removed from each run's environment. The login comes from
@@ -180,11 +202,13 @@ next `run` retries them.
 
 `score --keys FILE` writes the manifest behind a score: one row per run of the
 current suite with its content key, variant, case, sample, the stored run's CLI
-version, trace hash and turns, and its result (`pass`, `fail`, `unjudged` or `missing`).
-The header names the suite file by hash. Anyone with the suite can recompute the
+version, trace hash, turns and isolation policy, and its result (`pass`, `fail`,
+`unjudged` or `missing`). The header names the suite file by hash and says
+whether it was `isolated`. Anyone with the suite can recompute the
 keys, and anyone with the store can find each run and check its hash, without
 calling a model. It holds no prompt, input or output, so it can be archived beside
-a report. It never replaces an existing file.
+a report. It never replaces an existing file. It identifies the runs behind a
+score; it does not by itself prove they were isolated.
 
 Each finding names the rule, the
 file, and the Anthropic page the rule comes from.

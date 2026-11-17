@@ -13,6 +13,12 @@ from evalkit.spec import Case, PromptSpec, SkillSpec, Suite, Variant
 # results. Editing a case must not invalidate every stored trace of the skill.
 _NOT_SKILL = ("evals/", ".")
 
+# How a run is kept apart from other runs on the host. Bump it whenever that changes,
+# so runs stored under the old isolation are re-run rather than reused. Records written
+# before policies existed load as 0: they shared the host's temp dir.
+#   1: private TMPDIR/CLAUDE_CODE_TMPDIR/CARGO_TARGET_DIR; sandbox deny on shared temp roots
+ISOLATION_POLICY = 1
+
 
 @dataclass(frozen=True)
 class Job:
@@ -52,6 +58,8 @@ def job_key(suite: Suite, variant: Variant, digest: str, case: Case, sample: int
         payload["checkout"] = [case.checkout.head, case.checkout.base, case.checkout.ref]
     if suite.settings is not None:
         payload["settings"] = suite.settings
+    if suite.isolated is not None:  # absent otherwise, so other suites keep their keys
+        payload["isolated"] = list(suite.isolated.readable)
     return _sha(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode())
 
 

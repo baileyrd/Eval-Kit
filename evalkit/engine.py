@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Protocol, TypeVar
 
 from evalkit import checks, judge
-from evalkit.plan import Job
+from evalkit.plan import ISOLATION_POLICY, Job
 from evalkit.spec import Case, JudgeConfig, Variant
 from evalkit.store import JsonlStore, Record, Verdict
 from evalkit.trace import Trace
@@ -45,11 +45,11 @@ class Scored:
 
 
 def pending(jobs: Sequence[Job], store: JsonlStore, cli_version: str) -> list[Job]:
-    """Jobs with no stored trace from this CLI version."""
+    """Jobs with no stored trace from this CLI version under the current isolation."""
     out = []
     for job in jobs:
         record = store.get(job.key)
-        if record is None or record.cli_version != cli_version:
+        if record is None or record.cli_version != cli_version or record.policy != ISOLATION_POLICY:
             out.append(job)
     return out
 

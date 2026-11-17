@@ -234,7 +234,12 @@ def _score(args: argparse.Namespace) -> int:
     for row in stats.summarise(outcomes):
         trigger = "-" if row.trigger_rate is None else f"{row.trigger_rate:.0%}"
         print(f"{row.variant:<20} {row.runs:>4}/{expected:<4} {row.pass_rate:>6.0%} {trigger:>10}")
-    late = sum(1 for job in jobs if (r := store.get(job.key)) is not None and r.trace.turns > 1)
+    records = [r for r in (store.get(job.key) for job in jobs) if r is not None]
+    old = sum(1 for r in records if r.policy != plan.ISOLATION_POLICY)
+    if old:
+        print(f"{old} run(s) were made under an older isolation policy and may have shared "
+              "scratch with other runs; 'evalkit run' re-runs them")
+    late = sum(1 for r in records if r.trace.turns > 1)
     if late:
         print(f"{late} run(s) had a turn after the answer, such as a reply to a notice; "
               "each is scored on its first turn's answer")

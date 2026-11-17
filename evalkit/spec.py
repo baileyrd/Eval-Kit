@@ -146,6 +146,18 @@ class JudgeConfig:
 
 
 @dataclass(frozen=True)
+class Isolated:
+    """A suite whose runs must not read outside their own project and scratch.
+
+    Claude's file tools are fenced to the run's working directory and Bash must run
+    in the sandbox. ``readable`` re-opens paths sandboxed Bash still needs, such as
+    ``~/.cargo``.
+    """
+
+    readable: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Suite:
     path: Path
     samples: int
@@ -155,6 +167,7 @@ class Suite:
     cases: tuple[Case, ...]
     judge: JudgeConfig = JudgeConfig()
     settings: str | None = None  # Claude Code settings JSON for every run, ${NAME} unexpanded
+    isolated: Isolated | None = None  # None: only Bash's scratch is private
 
     def variant(self, variant_id: str) -> Variant:
         for variant in self.variants:
@@ -196,7 +209,7 @@ def load_suite(path: Path) -> Suite:
     """Read a whole suite: settings, variants and cases."""
     data = _read_toml(path)
     _check_keys(path, data, {"samples", "allowed_tools", "timeout", "judge", "settings",
-                             "variant", "case"})
+                             "isolated", "readable", "variant", "case"})
     samples = data.get("samples", 1)
     if not isinstance(samples, int) or not 1 <= samples <= MAX_SAMPLES:
         raise SpecError(path, f"samples must be an integer from 1 to {MAX_SAMPLES}")
@@ -209,7 +222,21 @@ def load_suite(path: Path) -> Suite:
     variants = tuple(_variant(path, vid, raw) for vid, raw in raw_variants.items())
     return Suite(path, samples, tuple(_str_list(path, data, "allowed_tools", default=[])),
                  timeout, variants, _cases(path, data), _judge(path, data.get("judge", {})),
-                 _settings(path, data))
+                 _settings(path, data), _isolated(path, data))
+
+
+def _isolated(path: Path, data: dict[str, object]) -> Isolated | None:
+    isolated = data.get("isolated", False)
+    if not isinstance(isolated, bool):
+        raise SpecError(path, "'isolated' must be true or false")
+    readable = _str_list(path, data, "readable", default=[])
+    if not isolated:
+        if readable:
+            raise SpecError(path, "'readable' re-opens paths in an isolated suite; set isolated = true")
+        return None
+    if not all(r.strip() for r in readable):
+        raise SpecError(path, "'readable' entries must not be empty")
+    return Isolated(tuple(readable))
 
 
 def _settings(path: Path, data: dict[str, object]) -> str | None:

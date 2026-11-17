@@ -42,13 +42,16 @@ class LateNoticeTest(unittest.TestCase):
         # total_cost_usd is the session's running total, so the largest one is the run's.
         self.assertEqual((parsed.cost_usd, parsed.duration_ms), (0.5, 130))
 
-    def test_an_injected_message_before_the_only_result_keeps_the_first_turn(self) -> None:
+    def test_a_notice_during_the_review_keeps_the_only_result(self) -> None:
+        # With one result event the CLI ended one turn, and its result is the answer,
+        # whatever messages arrived while it worked (Dottius, Eval-Kit #7).
         parsed = runner.parse_stream([
-            INIT, assistant("REVIEW"), user_text("background task finished"),
-            assistant("Thanks."), result("Thanks."),
+            INIT, assistant("Let me inspect the source."),
+            user_text("<task-notification>background task finished</task-notification>"),
+            assistant("The actual completed review."), result("The actual completed review."),
         ])
-        self.assertEqual(parsed.final_text, "REVIEW")
-        self.assertEqual(parsed.turns, 2)
+        self.assertEqual(parsed.final_text, "The actual completed review.")
+        self.assertEqual(parsed.turns, 1)
 
     def test_tool_results_are_not_new_turns(self) -> None:
         parsed = runner.parse_stream([
